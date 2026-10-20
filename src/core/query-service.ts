@@ -13,7 +13,7 @@ export class QueryService {
     },
   ) {}
 
-  async batch(items: QueryItem[]) {
+  async batch(items: QueryItem[], onStatsError = this.options.onStatsError) {
     const now = (this.options.now ?? Date.now)();
     const keys = [...new Set(items.flatMap((i) => i.names ?? []).map(normalizeName))];
     const aliases = await this.repo.findAliases(keys);
@@ -98,7 +98,7 @@ export class QueryService {
       try {
         await this.repo.recordHits([...hits], now);
       } catch (error) {
-        this.options.onStatsError?.(error);
+        onStatsError?.(error);
       }
     }
     return { results };

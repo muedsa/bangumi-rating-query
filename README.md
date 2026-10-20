@@ -423,6 +423,19 @@ bun run cli import --file backup.jsonl --api-url https://your-worker.example.com
 | `CALENDAR_SYNC_HOUR_UTC`       | `20`                                    | Node 每日调度的 UTC 小时，允许 0～23；Worker 使用 `triggers.crons`            |
 | `CALENDAR_PLATFORM_BATCH_SIZE` | `10`                                    | 单次日历同步最多补全的空作品形式数量，允许任意正整数                          |
 
+## 服务端异常日志
+
+Node 和 Worker 的服务端错误以 JSON Lines 输出到标准错误或 Cloudflare 日志。每个 HTTP 响应包含服务端生成的 `X-Request-ID`，可使用它查找日志中的 `requestId`；不复用客户端提供的同名请求头。CLI 的远程请求日志也会记录该响应 ID，方便关联本地导入失败与服务端错误。
+
+- `request_failed`：未知异常及返回 5xx 的业务错误，记录 HTTP 方法、路由模板、状态码、错误代码和请求 ID；合法的 Cloudflare Ray ID 会记录为 `rayId`。路由模板隐藏路径参数，日志不记录 URL 查询参数、请求正文、请求头或 Cookie。正常的 4xx 输入及认证错误不输出该事件。
+- `usage_write_failed`：统计写入失败，包含错误原因和当前请求 ID，但不影响查询成功返回。
+- `worker_configuration_error`：Worker 初始化失败，保留配置错误原因和请求 ID。此时路由尚未初始化，日志路径标记为 `[worker-initialization]`。
+- `calendar_sync_failed`：Node/Worker 定时任务失败，使用 `trigger=scheduled` 和独立 ID 关联；保留上游或数据库原因，向平台抛出的错误仍使用通用消息。
+
+错误日志中的 `causes` 最多包含 5 层原因链，每层消息最多 2000 字符、堆栈最多 8 帧；不会直接序列化异常附带的 `query`、`params` 等属性。已配置的管理 Token、Bangumi Token（包括编码形式）、Bearer 凭证、URL、引号内文本及标记出的 SQL/参数/正文片段会脱敏。HTTP 错误响应继续使用公开错误消息，不向调用者返回原因链或堆栈。
+
+例如原先只显示 `Error` 的 D1 故障，现在可以在 `causes` 中看到 `D1_ERROR: too many terms in compound SELECT`，并用 `requestId` 对照本地 CLI 日志。修改后需要重启 Node 或重新部署 Worker 才会生效。
+
 ## 开发与验证
 
 ```sh

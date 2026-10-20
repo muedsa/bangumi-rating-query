@@ -8,6 +8,7 @@ import { createApp } from '../http/app.ts';
 import { createBangumiSource } from '../adapters/bangumi/client.ts';
 import { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import { startCalendarSchedule } from '../scheduling/calendar.ts';
+import { createServerErrorLogger } from '../observability/errors.ts';
 
 if (existsSync('.env')) loadEnvFile('.env');
 const config = readConfig(process.env);
@@ -22,6 +23,7 @@ const stopCalendar = config.CALENDAR_SYNC_ENABLED
   ? startCalendarSchedule(
       new CalendarSyncService(repo, source, config.CALENDAR_PLATFORM_BATCH_SIZE),
       config.CALENDAR_SYNC_HOUR_UTC,
+      createServerErrorLogger({ secrets: [config.ADMIN_TOKEN, config.BANGUMI_ACCESS_TOKEN] }),
     )
   : () => {};
 const server = serve(

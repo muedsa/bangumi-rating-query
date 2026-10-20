@@ -85,7 +85,13 @@ test('远程请求日志包含状态、Ray 和耗时，失败后仍抛出原始�
     log: (level, event, _message, details = {}) => logs.push({ level, event, details }),
     fetcher: (async () =>
       fail
-        ? new Response('failure', { status: 503, headers: { 'cf-ray': 'test-ray' } })
+        ? new Response('failure', {
+            status: 503,
+            headers: {
+              'cf-ray': 'test-ray',
+              'x-request-id': '01234567-89ab-4cde-8fab-0123456789ab',
+            },
+          })
         : Response.json({ value: null })) as unknown as typeof fetch,
   });
   await target.getState('private-checkpoint');
@@ -97,7 +103,13 @@ test('远程请求日志包含状态、Ray 和耗时，失败后仍抛出原始�
   expect(logs.at(-1)).toMatchObject({
     level: 'error',
     event: 'api_request_failed',
-    details: { method: 'POST', path: '/import', status: 503, ray: 'test-ray' },
+    details: {
+      method: 'POST',
+      path: '/import',
+      status: 503,
+      ray: 'test-ray',
+      requestId: '01234567-89ab-4cde-8fab-0123456789ab',
+    },
   });
   expect(JSON.stringify(logs)).not.toContain('private-admin-token');
   expect(JSON.stringify(logs)).not.toContain('private-checkpoint');

@@ -31,6 +31,7 @@ export function remoteTarget(base: string, token: string, options: RemoteTargetO
     options.log?.('debug', 'api_request_started', '发送管理 API 请求', details);
     let status: number | undefined;
     let ray: string | null = null;
+    let requestId: string | null = null;
     try {
       const response = await fetcher(new URL(`/api/v1/admin${path}`, url), {
         method,
@@ -41,6 +42,10 @@ export function remoteTarget(base: string, token: string, options: RemoteTargetO
       });
       status = response.status;
       ray = response.headers.get('cf-ray');
+      const returnedRequestId = response.headers.get('x-request-id') ?? '';
+      requestId = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(returnedRequestId)
+        ? returnedRequestId
+        : null;
       if (!response.ok)
         throw new Error(
           `管理 API 返回 ${response.status}: ${(await response.text()).slice(0, 500)}`,
@@ -50,6 +55,7 @@ export function remoteTarget(base: string, token: string, options: RemoteTargetO
         ...details,
         status,
         ray,
+        requestId,
         durationMs: Math.round(performance.now() - startedAt),
       });
       return result;
@@ -58,6 +64,7 @@ export function remoteTarget(base: string, token: string, options: RemoteTargetO
         ...details,
         status,
         ray,
+        requestId,
         durationMs: Math.round(performance.now() - startedAt),
         errorType: error instanceof Error ? error.name : 'UnknownError',
       });

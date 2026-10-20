@@ -73,7 +73,8 @@ export class AppError extends Error {
     public status: 400 | 401 | 404 | 409 | 413 | 503,
     public code: string,
     message: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
   }
 }

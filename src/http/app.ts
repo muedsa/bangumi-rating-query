@@ -1,5 +1,7 @@
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { routePath } from 'hono/route';
+import type { Context } from 'hono';
 import { z, ZodError } from 'zod';
 import { AppError, batchSchema, importSchema, nameSchema, positiveId } from '../core/models.ts';
 import { QueryService } from '../core/query-service.ts';
@@ -10,13 +12,28 @@ import { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import { backupSchema } from '../core/backup.ts';
 import type { Config } from '../config.ts';
 import { getOpenApi } from './openapi.ts';
+import { createServerErrorLogger, requestErrorContext } from '../observability/errors.ts';
 
 export function createApp(
   repo: ApplicationRepository,
   config: Config,
-  dependencies: { subjectSource?: SubjectSource; calendarSource?: CalendarSource } = {},
+  dependencies: {
+    subjectSource?: SubjectSource;
+    calendarSource?: CalendarSource;
+    writeErrorLog?: (line: string) => void;
+  } = {},
 ) {
-  const app = new Hono();
+  type AppEnv = { Variables: { requestId: string } };
+  const app = new Hono<AppEnv>();
+  const logError = createServerErrorLogger({
+    secrets: [config.ADMIN_TOKEN, config.BANGUMI_ACCESS_TOKEN],
+    write: dependencies.writeErrorLog,
+  });
+  const errorContext = (c: Context<AppEnv>, status: number, code?: string) => ({
+    ...requestErrorContext(c.req.raw, routePath(c) || '[unmatched]', c.get('requestId')),
+    status,
+    code,
+  });
   const syncService = new SubjectSyncService(repo, dependencies.subjectSource);
   const calendarSync = new CalendarSyncService(
     repo,
@@ -26,9 +43,11 @@ export function createApp(
   const service = new QueryService(repo, {
     statsEnabled: config.STATS_ENABLED,
     ratingTtlHours: config.RATING_TTL_HOURS,
-    onStatsError: () => console.error(JSON.stringify({ event: 'usage_write_failed' })),
   });
   app.use('*', async (c, next) => {
+    const requestId = crypto.randomUUID();
+    c.set('requestId', requestId);
+    c.header('X-Request-ID', requestId);
     c.header('Cache-Control', 'no-store');
     c.header('X-Content-Type-Options', 'nosniff');
     await next();
@@ -42,8 +61,11 @@ export function createApp(
     }),
   );
   app.onError((error, c) => {
-    if (error instanceof AppError)
+    if (error instanceof AppError) {
+      if (error.status >= 500)
+        logError('request_failed', error, errorContext(c, error.status, error.code));
       return c.json({ error: { code: error.code, message: error.message } }, error.status);
+    }
     if (error instanceof ZodError)
       return c.json(
         {
@@ -57,7 +79,7 @@ export function createApp(
       );
     if (error instanceof SyntaxError)
       return c.json({ error: { code: 'INVALID_JSON', message: '请求体不是有效 JSON' } }, 400);
-    console.error(JSON.stringify({ event: 'request_failed', error: error.name }));
+    logError('request_failed', error, errorContext(c, 503, 'SERVICE_UNAVAILABLE'));
     return c.json(
       { error: { code: 'SERVICE_UNAVAILABLE', message: '服务暂不可用，请稍后重试' } },
       503,
@@ -74,11 +96,19 @@ export function createApp(
     const { items } = batchSchema.parse(await c.req.json());
     if (items.length > config.MAX_BATCH_SIZE)
       throw new AppError(400, 'BATCH_TOO_LARGE', `每批最多 ${config.MAX_BATCH_SIZE} 条`);
-    return c.json(await service.batch(items));
+    return c.json(
+      await service.batch(items, (error) =>
+        logError('usage_write_failed', error, errorContext(c, 200)),
+      ),
+    );
   });
   app.get('/api/v1/subjects/:id', async (c) => {
     const id = positiveId.parse(Number(c.req.param('id')));
-    const result = (await service.batch([{ inputId: String(id), subjectId: id }])).results[0]!;
+    const result = (
+      await service.batch([{ inputId: String(id), subjectId: id }], (error) =>
+        logError('usage_write_failed', error, errorContext(c, 200)),
+      )
+    ).results[0]!;
     if (result.status === 'not_found') throw new AppError(404, 'SUBJECT_NOT_FOUND', '条目未收录');
     return c.json(result);
   });

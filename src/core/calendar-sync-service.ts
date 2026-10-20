@@ -25,11 +25,12 @@ export class CalendarSyncService {
     let snapshot;
     try {
       snapshot = await this.source.getCalendar();
-    } catch {
+    } catch (error) {
       throw new AppError(
         503,
         'BANGUMI_API_ERROR',
         'Bangumi 日历获取或校验失败，请检查服务端配置或稍后重试',
+        { cause: error },
       );
     }
     await this.repo.mergeCalendar(snapshot);

@@ -62,19 +62,25 @@ function operation(
   response: z.ZodType,
   options: { body?: z.ZodType; admin?: boolean; parameters?: unknown[] } = {},
 ) {
+  const headers = {
+    'X-Request-ID': {
+      description: '服务端生成的请求关联 ID，用于查找错误日志',
+      schema: { type: 'string', format: 'uuid' },
+    },
+  };
   return {
     summary,
     ...(options.admin ? { security: [{ bearerAuth: [] }] } : {}),
     ...(options.parameters ? { parameters: options.parameters } : {}),
     ...(options.body ? { requestBody: { required: true, content: json(options.body) } } : {}),
     responses: {
-      '200': { description: '成功', content: json(response) },
-      '400': { description: '参数无效', content: json(errorSchema) },
-      '401': { description: '管理凭证无效', content: json(errorSchema) },
-      '404': { description: '资源不存在', content: json(errorSchema) },
-      '409': { description: '资源冲突', content: json(errorSchema) },
-      '413': { description: '请求体超过 256 KiB', content: json(errorSchema) },
-      '503': { description: '服务不可用或管理接口关闭', content: json(errorSchema) },
+      '200': { description: '成功', content: json(response), headers },
+      '400': { description: '参数无效', content: json(errorSchema), headers },
+      '401': { description: '管理凭证无效', content: json(errorSchema), headers },
+      '404': { description: '资源不存在', content: json(errorSchema), headers },
+      '409': { description: '资源冲突', content: json(errorSchema), headers },
+      '413': { description: '请求体超过 256 KiB', content: json(errorSchema), headers },
+      '503': { description: '服务不可用或管理接口关闭', content: json(errorSchema), headers },
     },
   };
 }

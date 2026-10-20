@@ -370,6 +370,7 @@ async function runtime(
     calendarPlatformBatchSize?: number;
   },
 ) {
+  const logs: string[] = [];
   if (kind === 'node') {
     const driver = new SqliteDriver(':memory:');
     driver.migrate();
@@ -385,10 +386,13 @@ async function runtime(
         ADMIN_TOKEN: token,
         STATS_ENABLED: String(enabled),
         CALENDAR_PLATFORM_BATCH_SIZE: bangumi?.calendarPlatformBatchSize ?? 10,
+        BANGUMI_USER_AGENT: bangumi?.userAgent ?? '',
+        BANGUMI_ACCESS_TOKEN: bangumi?.accessToken ?? '',
       }),
       {
         subjectSource: source,
         calendarSource: source,
+        writeErrorLog: (line) => logs.push(line),
       },
     );
     const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
@@ -396,6 +400,7 @@ async function runtime(
     const address = server.address();
     assert(address && typeof address !== 'string');
     return {
+      logs,
       baseUrl: `http://127.0.0.1:${address.port}`,
       fetch: (path: string, init?: RequestInit) =>
         fetch(`http://127.0.0.1:${address.port}${path}`, init),
@@ -414,6 +419,9 @@ async function runtime(
       scriptPath: 'dist/worker.js',
       compatibilityDate: '2026-10-20',
       d1Databases: ['DB'],
+      handleStructuredLogs: (log) => {
+        logs.push(log.message);
+      },
       bindings: {
         ADMIN_TOKEN: token,
         STATS_ENABLED: String(enabled),
@@ -449,6 +457,7 @@ async function runtime(
     .filter(Boolean))
     await db.prepare(statement).run();
   return {
+    logs,
     baseUrl: (await mf.ready).origin,
     fetch: async (path: string, init?: RequestInit) =>
       (await mf.dispatchFetch(
@@ -460,6 +469,143 @@ async function runtime(
     close: () => mf.dispose(),
   };
 }
+
+for (const kind of ['node', 'worker'] as const)
+  test(`${kind}: 数据库故障记录原因链和关联 ID，不泄露请求内容或凭证`, async () => {
+    const bangumiSecret = 'server-error-test-bangumi-token';
+    const target = await runtime(kind, false, {
+      userAgent: 'tester/errors',
+      accessToken: bangumiSecret,
+      fetcher: (async () => Response.json({})) as unknown as typeof fetch,
+    });
+    try {
+      await target.sql(
+        `CREATE TRIGGER reject_import BEFORE INSERT ON subjects BEGIN SELECT RAISE(ABORT, 'storage failure ${bangumiSecret}; params: private-sql-parameter'); END`,
+      );
+      const response = await target.fetch('/api/v1/admin/import?private-query-value=1', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'X-Request-ID': 'untrusted-private-header',
+          'CF-Ray': '0123456789abcdef-HKG',
+        },
+        body: JSON.stringify(fixture(8, 'private-request-body')),
+      });
+      assert.equal(response.status, 503);
+      const body = (await response.json()) as any;
+      assert.deepEqual(body, {
+        error: { code: 'SERVICE_UNAVAILABLE', message: '服务暂不可用，请稍后重试' },
+      });
+      // workerd 日志通过独立通道传回，允许其在响应之后到达。
+      for (let i = 0; i < 20 && !target.logs.some((line) => line.includes('request_failed')); i++)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      const entry = target.logs
+        .filter((line) => line.startsWith('{'))
+        .map((line) => JSON.parse(line))
+        .find((entry) => entry.event === 'request_failed');
+      assert(entry, target.logs.join('\n'));
+      assert.equal(entry.method, 'POST');
+      assert.equal(entry.path, '/api/v1/admin/import');
+      assert.equal(entry.status, 503);
+      assert.equal(entry.requestId, response.headers.get('X-Request-ID'));
+      assert(
+        entry.causes.some((cause: { message: string }) =>
+          cause.message.includes('storage failure'),
+        ),
+      );
+      const output = JSON.stringify(entry);
+      for (const secret of [
+        token,
+        bangumiSecret,
+        'private-query-value',
+        'private-request-body',
+        'private-sql-parameter',
+        'untrusted-private-header',
+      ])
+        assert(!output.includes(secret));
+      assert.equal((await target.sql('SELECT * FROM subjects')).length, 0);
+    } finally {
+      await target.close();
+    }
+  });
+
+test('Worker 初始化失败输出配置原因及关联 ID，响应不暴露内部异常', async () => {
+  const logs: string[] = [];
+  const mf = new Miniflare(
+    convertV4MiniflareOptions({
+      name: 'configuration-error',
+      modules: true,
+      scriptPath: 'dist/worker.js',
+      compatibilityDate: '2026-10-20',
+      d1Databases: ['DB'],
+      bindings: {
+        ADMIN_TOKEN: token,
+        BANGUMI_ACCESS_TOKEN: 'worker-private-config-token',
+        STATS_ENABLED: 'invalid',
+      },
+      handleStructuredLogs: (log) => {
+        logs.push(log.message);
+      },
+    }),
+  );
+  try {
+    const response = await mf.dispatchFetch('http://localhost/health/ready?private-query=1');
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: { code: 'CONFIGURATION_ERROR', message: '服务配置无效' },
+    });
+    for (
+      let i = 0;
+      i < 20 && !logs.some((line) => line.includes('worker_configuration_error'));
+      i++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    const entry = logs
+      .filter((line) => line.startsWith('{'))
+      .map((line) => JSON.parse(line))
+      .find((entry) => entry.event === 'worker_configuration_error');
+    assert(entry, logs.join('\n'));
+    assert.equal(entry.requestId, response.headers.get('X-Request-ID'));
+    assert.equal(entry.causes[0].name, 'ZodError');
+    assert(!JSON.stringify(entry).includes('private-query'));
+    assert(!JSON.stringify(entry).includes('worker-private-config-token'));
+  } finally {
+    await mf.dispose();
+  }
+});
+
+test('Worker 定时同步失败保留上游原因，并向平台报告失败', async () => {
+  const target = await runtime('worker', false, {
+    userAgent: 'tester/errors',
+    accessToken: 'cron-private-access-token',
+    calendarSyncEnabled: true,
+    fetcher: (async () => new Response('', { status: 401 })) as unknown as typeof fetch,
+  });
+  try {
+    assert(target.scheduled);
+    const result = await target.scheduled();
+    assert.equal(result.outcome, 'exception');
+    for (
+      let i = 0;
+      i < 20 && !target.logs.some((line) => line.includes('calendar_sync_failed'));
+      i++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    const entries = target.logs
+      .filter((line) => line.startsWith('{'))
+      .map((line) => JSON.parse(line))
+      .filter((entry) => entry.event === 'calendar_sync_failed');
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].trigger, 'scheduled');
+    assert(
+      entries[0].causes.some((cause: { message: string }) => cause.message.includes('HTTP 401')),
+    );
+    assert(!JSON.stringify(entries).includes('cron-private-access-token'));
+  } finally {
+    await target.close();
+  }
+});
 
 for (const kind of ['node', 'worker'] as const)
   test(`${kind}: Archive 多别名导入兼容 D1，保留手动别名并支持幂等重放`, async () => {

@@ -17,11 +17,12 @@ export class SubjectSyncService {
     let record;
     try {
       record = await this.source.getSubject(id);
-    } catch {
+    } catch (error) {
       throw new AppError(
         503,
         'BANGUMI_API_ERROR',
         'Bangumi 数据获取失败，请检查服务端认证配置或稍后重试',
+        { cause: error },
       );
     }
     await this.repo.importRecord(record);
