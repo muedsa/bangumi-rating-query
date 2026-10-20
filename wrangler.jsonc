@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bangumi-rating-query",
+  "main": "src/entrypoints/worker.ts",
+  "compatibility_date": "2026-10-20",
+  "workers_dev": true,
+  "upload_source_maps": true,
+  "vars": {
+    "BANGUMI_USER_AGENT": "muedsa/bangumi-rating-query",
+    "STATS_ENABLED": "false",
+    "MAX_BATCH_SIZE": "20",
+    "RATING_TTL_HOURS": "24",
+    "CALENDAR_SYNC_ENABLED": "true",
+    "CALENDAR_PLATFORM_BATCH_SIZE": "1000",
+  },
+  "triggers": {
+    "crons": ["0 20 * * *"],
+  },
+  // ADMIN_TOKEN 和 BANGUMI_ACCESS_TOKEN 通过 wrangler secret put 配置，禁止在 vars 中填写。
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bangumi-rating-query",
+      "database_id": "1d3f8551-7394-49bc-99bc-06c558c88a9f",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+    },
+    "traces": {
+      "enabled": true,
+    },
+    "issues": {
+      "enabled": true,
+    },
+  },
+}

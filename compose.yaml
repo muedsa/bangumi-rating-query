@@ -1,0 +1,20 @@
+services:
+  api:
+    build: .
+    ports:
+      - '127.0.0.1:3000:3000'
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      STATS_ENABLED: ${STATS_ENABLED:-false}
+      MAX_BATCH_SIZE: ${MAX_BATCH_SIZE:-20}
+      RATING_TTL_HOURS: ${RATING_TTL_HOURS:-24}
+      BANGUMI_USER_AGENT: ${BANGUMI_USER_AGENT:-}
+      BANGUMI_ACCESS_TOKEN: ${BANGUMI_ACCESS_TOKEN:-}
+      CALENDAR_SYNC_ENABLED: ${CALENDAR_SYNC_ENABLED:-false}
+      CALENDAR_SYNC_HOUR_UTC: ${CALENDAR_SYNC_HOUR_UTC:-20}
+      CALENDAR_PLATFORM_BATCH_SIZE: ${CALENDAR_PLATFORM_BATCH_SIZE:-10}
+    volumes:
+      - bangumi-data:/app/data
+    restart: unless-stopped
+volumes:
+  bangumi-data:

@@ -1,0 +1,49 @@
+{
+  "name": "bangumi-rating-query",
+  "version": "0.1.0",
+  "description": "支持名称与别名批量查询的 Bangumi 动画评分 JSON 后端，适配 Cloudflare Worker 和 Node.js。",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.3",
+  "engines": {
+    "node": ">=24.12.0",
+    "bun": ">=1.4.3"
+  },
+  "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "build": "bun run build:node && bun run build:worker",
+    "build:node": "bun build src/entrypoints/node.ts src/entrypoints/cli.ts --target=node --outdir=dist/node",
+    "build:worker": "bun build src/entrypoints/worker.ts --target=browser --outfile=dist/worker.js",
+    "start": "node dist/node/node.js",
+    "dev:worker": "wrangler dev",
+    "deploy:worker": "wrangler deploy",
+    "db:migrate": "node dist/node/cli.js migrate",
+    "db:migrate:worker": "wrangler d1 migrations apply DB --local",
+    "cli": "node dist/node/cli.js",
+    "stats:summary": "node dist/node/cli.js stats",
+    "retention:preview": "node dist/node/cli.js retention-preview",
+    "test": "bun test tests/unit",
+    "test:integration": "bun run build && bun build tests/integration.ts --target=node --packages=external --outfile=.cache/integration.mjs && node --test .cache/integration.mjs",
+    "check": "bun run format:check && bun run typecheck && bun run test && bun run test:integration"
+  },
+  "dependencies": {
+    "@bgm38/wiki": "^0.3.3",
+    "@hono/node-server": "^2.1.5",
+    "drizzle-orm": "^0.45.4",
+    "fflate": "^0.8.3",
+    "hono": "^4.13.13",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "@types/bun": "^1.4.3",
+    "@types/node": "^26.6.5",
+    "miniflare": "^5.20261019.0-beta",
+    "prettier": "^3.9.10",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.151.2"
+  }
+}

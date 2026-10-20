@@ -1,0 +1,8 @@
+# 跨平台统一使用 LF；二进制文件由 Git 自动识别。
+* text=auto eol=lf
+
+bun.lock text eol=lf
+*.zip binary
+*.sqlite binary
+*.sqlite-shm binary
+*.sqlite-wal binary
