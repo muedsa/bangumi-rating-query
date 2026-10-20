@@ -231,7 +231,7 @@ bun run build:node
 bun run cli sync-archive --file data/subject.jsonlines --skip-invalid --limit 1000
 ```
 
-若文件没有 `.meta.json`，仍需带上原先使用的 `--as-of`。跳过的是整个条目，其已入库的旧数据保持不变。错误信息追加到输入文件旁的 `subject.jsonlines.errors.jsonl`，包含文件版本标识、原始行号、可识别的条目 ID 和原因，也会输出到标准错误。数据库、远程 API、文件读取或错误日志写入失败仍会终止，不会被当作无效数据跳过。
+若文件没有 `.meta.json`，仍需带上原先使用的 `--as-of`。跳过的是整个条目，其已入库的旧数据保持不变。错误信息追加到输入文件旁的 `subject.jsonlines.errors.jsonl`，包含文件版本标识、原始行号、可识别的条目 ID 和原因，也会输出到标准错误。数据库、文件读取或错误日志写入失败仍会终止；远程 API 不可重试的错误或重试耗尽也会终止，不会被当作无效数据跳过。
 
 结果中 `skipped` 是本次跳过数量，`skippedTotal` 是该检查点累计跳过数量。`complete=true` 仅表示已遍历文件；有跳过记录时 `status=partial`，触及批次上限时为 `in_progress`，全部遍历且无跳过时才为 `complete`。允许跳过的运行正常退出，自动化应检查 `status`，不能只凭退出码认定全部数据已入库。
 
@@ -253,7 +253,7 @@ bun run cli sync-archive --file data/subject.jsonlines --dry-run --skip-invalid 
 
 该模式从文件首行开始，默认扫描整个文件；显式指定 `--limit` 时，以成功解析的动画条数为上限，无效项和非动画不占额度。无需管理 Token，也可省略 `--as-of`；如果传入快照时间或文件旁存在 `.meta.json`，仍会校验其中的时间格式。
 
-`--dry-run` 不连接本地数据库或远程 API，不读取或更新同步检查点，也不创建或追加 `.errors.jsonl`；即使带有 `--api-url` 和 `--request-delay-ms`，也不会发送请求或等待请求间隔。因此不会推进下一批实际导入的位置。无效项默认终止解析，添加 `--skip-invalid` 后跳过并记录到 stderr 日志。
+`--dry-run` 不连接本地数据库或远程 API，不读取或更新同步检查点，也不创建或追加 `.errors.jsonl`；即使带有 `--api-url`、`--request-delay-ms` 和 `--request-retries`，也不会发送请求或等待。因此不会推进下一批实际导入的位置。无效项默认终止解析，添加 `--skip-invalid` 后跳过并记录到 stderr 日志。
 
 stdout 输出 JSON 汇总：`dryRun=true`、`parsed`（成功解析的动画条数）、`ignored`（非动画）、`skipped`（无效项）、`emptyLines`（空行）、`line`（当前文件行号）、`complete` 和 `status`。`imported` 始终为 `0`，`errorLog` 为 `null`。统计按行计数，相同条目 ID 的重复行会分别计数；只有完整扫描且没有跳过项时，`status` 才为 `complete`。
 
@@ -274,7 +274,22 @@ bun run cli sync-subject --id 123 --api-url https://your-api.example.com
 bun run cli sync-archive --file data/subject.jsonlines --api-url https://your-api.example.com --as-of 2026-10-20T08:18:54Z --limit 1000 --request-delay-ms 500
 ```
 
-首次请求立即发送，之后从上一次响应体处理完毕开始等待；导入、读取和保存检查点等所有远程管理请求都使用相同间隔。其他使用 `--api-url` 的 CLI 命令也支持此选项。本地 SQLite 操作以及服务端访问 Bangumi 的请求不受该选项影响。发生服务错误时仍会停止并保留已完成进度，延迟选项不启用自动重试。
+首次请求立即发送，之后从上一次响应体处理完毕开始等待；导入、读取和保存检查点等所有远程管理请求都使用相同间隔。其他使用 `--api-url` 的 CLI 命令也支持此选项。本地 SQLite 操作以及服务端访问 Bangumi 的请求不受该选项影响。
+
+`sync-archive` 的远程请求默认失败后最多**额外重试 3 次**，即每个请求最多发送 4 次。使用 `--request-retries` 指定非负整数，设为 `0` 可关闭重试：
+
+```sh
+bun run build:node
+bun run cli sync-archive --file data/subject.jsonlines --api-url https://your-api.example.com --as-of 2026-10-20T08:18:54Z --limit 1000 --request-delay-ms 200 --request-retries 3 --skip-invalid
+```
+
+网络连接异常、超时、响应体读取中断及 HTTP `408`、`429`、`5xx` 可重试；其他 HTTP 错误（如 `400`、`401`、`403`）及响应 JSON 解析错误立即停止。每个导入请求及检查点读写请求独立计算重试次数；重试始终发送相同的请求正文，成功后才继续处理下一条。
+
+重试使用指数退避，依次等待 1、2、4、8 秒，退避上限为 30 秒；实际等待取退避时间、`--request-delay-ms` 和服务端 `Retry-After` 的最大值。`Retry-After` 支持秒数和 HTTP 日期；若服务端要求等待超过一分钟，命令停止并提示稍后续跑，不会提前重试。
+
+默认日志会以 `warn` 输出 `api_request_retry`，包含 `attempt`（当前失败的是第几次请求）、`retry`（即将执行第几次重试）、`requestRetries`（重试上限）、`waitMs`、HTTP 状态及请求关联信息。重试耗尽后以 `error` 输出 `api_request_failed`，命令非零退出；`--skip-invalid` 不会跳过这些请求失败，也不会推进失败条目的检查点。稍后执行相同文件和 `--as-of` 的命令即可续跑。
+
+`--request-retries` 仅支持 `sync-archive` 的远程管理请求，不影响本地 SQLite、`--dry-run` 或服务端访问 Bangumi 的重试策略。其他 CLI 命令保持不自动重试。
 
 Archive 和单条目更新可用系统定时任务、CI 等周期执行以上 CLI；Archive 分批初始化尤其需要按 D1 当日写入余量决定批次，不建议一次无预算地导入全库。calendar 日历更新另有内置定时任务，见下文。
 
@@ -285,7 +300,7 @@ Archive 和单条目更新可用系统定时任务、CI 等周期执行以上 CL
 - 启动、存储目标就绪、完成及失败均有日志；长任务每 5 秒报告当前阶段。
 - Archive 导入会报告文件校验、检查点恢复和保存、当前文件行号、条目 ID、成功数、无效跳过数、非动画忽略数、累计跳过数及导入速度。计数和速度针对本次执行，`checkpointLine` 是最近一次成功保存的检查点行号。
 - 备份报告校验、分页导出及恢复进度；下载报告已接收字节数、解压和文件校验阶段；calendar 每轮报告导入和 platform 补全结果。
-- 失败会记录当前阶段、进度与错误原因链；远程请求失败还记录 HTTP 状态码（如已收到响应）、耗时及 Cloudflare Ray ID（如有）。进度和检查点日志不会改变原有续跑规则，不会因为记录日志自动重试请求。
+- 失败会记录当前阶段、进度与错误原因链；远程请求失败还记录 HTTP 状态码（如已收到响应）、耗时、Cloudflare Ray ID 和服务端 `X-Request-ID`（如有）。Archive 远程请求重试另有 `api_request_retry` 日志，调整日志级别不影响重试和续跑规则。
 
 `--log-level` 支持 `debug`、`info`（默认）、`warn`、`error` 和 `silent`。`debug` 额外记录逐条导入、API 请求开始和结束、请求间隔等待；`silent` 关闭 CLI 日志，失败仍返回非零退出码。Node 自身的运行时警告不受此参数控制。
 

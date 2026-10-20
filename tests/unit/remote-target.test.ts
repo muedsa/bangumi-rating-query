@@ -114,3 +114,226 @@ test('远程请求日志包含状态、Ray 和耗时，失败后仍抛出原始�
   expect(JSON.stringify(logs)).not.toContain('private-admin-token');
   expect(JSON.stringify(logs)).not.toContain('private-checkpoint');
 });
+
+test('重试 3 次表示最多发送 4 次，耗尽后保留原始错误和每次请求关联信息', async () => {
+  const waits: number[] = [];
+  const logs: { level: string; event: string; details: Record<string, unknown> }[] = [];
+  let calls = 0;
+  const target = remoteTarget('https://example.com', 'private-admin-token', {
+    requestRetries: 3,
+    sleep: async (ms) => {
+      waits.push(ms);
+    },
+    log: (level, event, _message, details = {}) => logs.push({ level, event, details }),
+    fetcher: (async () =>
+      new Response('unavailable', {
+        status: 503,
+        headers: {
+          'cf-ray': `ray-${++calls}`,
+          'x-request-id': '01234567-89ab-4cde-8fab-0123456789ab',
+        },
+      })) as unknown as typeof fetch,
+  });
+  await expect(target.getState('private-checkpoint')).rejects.toThrow('管理 API 返回 503');
+  expect(calls).toBe(4);
+  expect(waits).toEqual([1000, 2000, 4000]);
+  const retries = logs.filter((log) => log.event === 'api_request_retry');
+  expect(retries).toHaveLength(3);
+  expect(retries[0]).toMatchObject({
+    level: 'warn',
+    details: {
+      path: '/sync-state/:key',
+      attempt: 1,
+      retry: 1,
+      requestRetries: 3,
+      waitMs: 1000,
+      status: 503,
+      ray: 'ray-1',
+      requestId: '01234567-89ab-4cde-8fab-0123456789ab',
+    },
+  });
+  expect(logs.at(-1)).toMatchObject({
+    level: 'error',
+    event: 'api_request_failed',
+    details: { attempt: 4, ray: 'ray-4' },
+  });
+  expect(JSON.stringify(logs)).not.toContain('private-admin-token');
+  expect(JSON.stringify(logs)).not.toContain('private-checkpoint');
+});
+
+test('网络、超时和临时 HTTP 错误可恢复；重放相同正文与认证并重新创建超时信号', async () => {
+  for (const failure of [
+    new TypeError('fetch failed'),
+    new DOMException('timed out', 'TimeoutError'),
+    new DOMException('aborted', 'AbortError'),
+    408,
+    429,
+    500,
+    502,
+    503,
+    504,
+    524,
+  ]) {
+    const attempts: RequestInit[] = [];
+    const waits: number[] = [];
+    const target = remoteTarget('https://example.com', 'test-token', {
+      requestRetries: 3,
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+      fetcher: (async (_url, init) => {
+        attempts.push(init!);
+        if (attempts.length === 1) {
+          if (failure instanceof Error) throw failure;
+          return new Response('temporary error', { status: failure });
+        }
+        return Response.json({});
+      }) as typeof fetch,
+    });
+    await target.setState('checkpoint', '{"line":100}');
+    expect(waits).toEqual([1000]);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]!.body).toBe(attempts[0]!.body);
+    expect(attempts[1]!.method).toBe('PUT');
+    expect(attempts[1]!.signal).not.toBe(attempts[0]!.signal);
+    expect(new Headers(attempts[1]!.headers).get('Authorization')).toBe('Bearer test-token');
+  }
+});
+
+test('成功状态的响应体读取中断可重试，畸形 JSON 不重试', async () => {
+  for (const brokenJson of [false, true]) {
+    let calls = 0;
+    const target = remoteTarget('https://example.com', 'test-token', {
+      requestRetries: 3,
+      sleep: async () => {},
+      fetcher: (async () => {
+        if (++calls > 1) return Response.json({ value: 'saved' });
+        if (brokenJson) return new Response('{invalid');
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new TypeError('connection terminated'));
+            },
+          }),
+        );
+      }) as unknown as typeof fetch,
+    });
+    if (brokenJson) {
+      await expect(target.getState('key')).rejects.toBeInstanceOf(SyntaxError);
+      expect(calls).toBe(1);
+    } else {
+      expect(await target.getState('key')).toBe('saved');
+      expect(calls).toBe(2);
+    }
+  }
+});
+
+test('默认未开启重试或显式设为 0 时立即失败；普通 4xx 即使启用重试也立即失败', async () => {
+  for (const [requestRetries, status] of [
+    [undefined, 503],
+    [0, 503],
+    ...[400, 401, 403, 404, 409, 413, 422].map((status) => [3, status]),
+  ]) {
+    let calls = 0;
+    const waits: number[] = [];
+    const target = remoteTarget('https://example.com', 'test-token', {
+      requestRetries,
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+      fetcher: (async () => {
+        calls++;
+        return new Response('error', { status });
+      }) as unknown as typeof fetch,
+    });
+    await expect(target.importRecord({} as never)).rejects.toThrow(`管理 API 返回 ${status}`);
+    expect(calls).toBe(1);
+    expect(waits).toEqual([]);
+  }
+});
+
+test('Retry-After 支持秒数和日期，遵守请求间隔；无效值退避，超过一分钟停止', async () => {
+  const future = new Date(Date.now() + 10000).toUTCString();
+  for (const retryAfter of ['2', future, 'invalid', '0', '61', '9'.repeat(400)]) {
+    let calls = 0;
+    const waits: number[] = [];
+    const target = remoteTarget('https://example.com', 'test-token', {
+      requestRetries: 3,
+      requestDelayMs: 1500,
+      sleep: async (ms) => {
+        waits.push(ms);
+      },
+      fetcher: (async () =>
+        ++calls === 1
+          ? new Response('busy', { status: 429, headers: { 'Retry-After': retryAfter } })
+          : Response.json({})) as unknown as typeof fetch,
+    });
+    if (retryAfter === '61' || retryAfter.length === 400) {
+      await expect(target.importRecord({} as never)).rejects.toThrow('管理 API 返回 429');
+      expect(calls).toBe(1);
+      expect(waits).toEqual([]);
+    } else {
+      await target.importRecord({} as never);
+      expect(calls).toBe(2);
+      expect(waits).toHaveLength(1);
+      if (retryAfter === future) {
+        expect(waits[0]!).toBeGreaterThan(8000);
+        expect(waits[0]!).toBeLessThanOrEqual(10000);
+      } else expect(waits[0]).toBe(retryAfter === '2' ? 2000 : 1500);
+    }
+  }
+});
+
+test('启用限速时完成全部重试后再处理排队请求，重试预算按请求独立计算', async () => {
+  const events: string[] = [];
+  let calls = 0;
+  const target = remoteTarget('https://example.com', 'test-token', {
+    requestRetries: 1,
+    requestDelayMs: 200,
+    sleep: async (ms) => {
+      events.push(`wait:${ms}`);
+    },
+    fetcher: (async (_url, init) => {
+      events.push(`${init?.method}:${++calls}`);
+      return calls % 2
+        ? new Response('unavailable', { status: 503 })
+        : Response.json({ value: null });
+    }) as typeof fetch,
+  });
+  await Promise.all([target.getState('key'), target.setState('key', 'saved')]);
+  expect(events).toEqual([
+    'GET:1',
+    'wait:1000',
+    'GET:2',
+    'wait:200',
+    'PUT:3',
+    'wait:1000',
+    'PUT:4',
+  ]);
+});
+
+test('重试退避上限为 30 秒，耗尽后抛出最后一次网络错误', async () => {
+  const waits: number[] = [];
+  let calls = 0;
+  const error = new TypeError('fetch failed');
+  const target = remoteTarget('https://example.com', 'test-token', {
+    requestRetries: 7,
+    sleep: async (ms) => {
+      waits.push(ms);
+    },
+    fetcher: (async () => {
+      calls++;
+      throw error;
+    }) as unknown as typeof fetch,
+  });
+  await expect(target.getState('key')).rejects.toBe(error);
+  expect(calls).toBe(8);
+  expect(waits).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+});
+
+test('拒绝负数、小数、非有限值和不安全的重试次数', () => {
+  for (const requestRetries of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])
+    expect(() => remoteTarget('https://example.com', 'test-token', { requestRetries })).toThrow(
+      '请求重试次数必须为非负安全整数',
+    );
+});

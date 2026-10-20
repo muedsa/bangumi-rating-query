@@ -61,6 +61,8 @@ test('Archive dry-run 默认全量统计，不请求 API、不创建数据库或
         file,
         '--dry-run',
         '--skip-invalid',
+        '--request-retries',
+        '3',
         '--api-url',
         `http://127.0.0.1:${address.port}`,
         ...extra,
@@ -296,6 +298,8 @@ test('CLI 慢请求持续输出进度，失败日志包含条目与检查点且�
           '2026-01-01T00:00:00Z',
           '--api-url',
           `http://127.0.0.1:${address.port}`,
+          '--request-retries',
+          '0',
         ],
         { env: { ...process.env, ADMIN_TOKEN: token } },
       ),
@@ -329,6 +333,100 @@ test('CLI 慢请求持续输出进度，失败日志包含条目与检查点且�
         return true;
       },
     );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('CLI Archive 默认重试 3 次并恢复导入和检查点，参数控制次数且失败不跳过', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bangumi-request-retries-'));
+  const file = join(dir, 'subject.jsonlines');
+  await writeFile(file, JSON.stringify({ id: 8, type: 2, name: '重试条目' }) + '\n');
+  let counts: Record<string, number> = {};
+  let failures: Record<string, number> = { GET: 1, POST: 3, PUT: 1 };
+  let status = 503;
+  const bodies: string[] = [];
+  const server = createServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    const method = request.method!;
+    counts[method] = (counts[method] ?? 0) + 1;
+    if (method === 'POST') bodies.push(body);
+    const failed = counts[method]! <= (failures[method] ?? 0);
+    response.writeHead(failed ? status : 200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify(failed ? { error: 'temporary failure' } : { value: null }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert(address && typeof address !== 'string');
+  const run = (extra: string[] = []) =>
+    promisify(execFile)(
+      process.execPath,
+      [
+        'dist/node/cli.js',
+        'sync-archive',
+        '--file',
+        file,
+        '--as-of',
+        '2026-01-01T00:00:00Z',
+        '--api-url',
+        `http://127.0.0.1:${address.port}`,
+        '--skip-invalid',
+        ...extra,
+      ],
+      { env: { ...process.env, ADMIN_TOKEN: token } },
+    );
+  try {
+    const { stdout, stderr } = await run();
+    assert.equal(JSON.parse(stdout).imported, 1);
+    assert.deepEqual(counts, { GET: 2, POST: 4, PUT: 2 });
+    assert.equal(new Set(bodies).size, 1, '所有重试应重放相同的导入正文');
+    const logs = stderr
+      .split('\n')
+      .filter((line) => line.startsWith('{'))
+      .map((line) => JSON.parse(line));
+    assert(logs.some((log) => log.event === 'target_ready' && log.requestRetries === 3));
+    assert.equal(logs.filter((log) => log.event === 'api_request_retry').length, 5);
+    assert(!logs.some((log) => log.event === 'api_request_failed'));
+    assert.equal(logs.at(-1).event, 'cli_completed');
+    assert(!stderr.includes(token));
+
+    for (const scenario of [
+      { extra: ['--request-retries', '1'], attempts: 2, status: 503 },
+      { extra: ['--request-retries', '0'], attempts: 1, status: 503 },
+      { extra: [], attempts: 1, status: 401 },
+    ]) {
+      counts = {};
+      failures = { POST: Infinity };
+      status = scenario.status;
+      await assert.rejects(run(scenario.extra), (error: unknown) => {
+        const failure = error as { stdout: string; stderr: string; code: number };
+        assert.equal(failure.code, 1);
+        assert.equal(failure.stdout, '');
+        const failedLogs = failure.stderr
+          .split('\n')
+          .filter((line) => line.startsWith('{'))
+          .map((line) => JSON.parse(line));
+        assert.equal(
+          failedLogs.filter((log) => log.event === 'api_request_retry').length,
+          scenario.attempts - 1,
+        );
+        assert.equal(failedLogs.at(-1).imported, 0);
+        assert.equal(failedLogs.at(-1).skipped, 0);
+        assert.equal(failedLogs.at(-1).checkpointLine, 0);
+        assert.equal(failedLogs.at(-1).subjectId, 8);
+        assert(failure.stderr.includes(`管理 API 返回 ${scenario.status}`));
+        assert(!failure.stderr.includes('archive_checkpoint_saved'));
+        return true;
+      });
+      assert.deepEqual(counts, { GET: 1, POST: scenario.attempts });
+      assert.equal(existsSync(`${file}.errors.jsonl`), false);
+    }
+    for (const invalid of ['-1', '0.5', 'NaN', 'Infinity', '9007199254740992']) {
+      counts = {};
+      await assert.rejects(run(['--request-retries', invalid]));
+      assert.deepEqual(counts, {}, '无效参数必须在发送请求前拒绝');
+    }
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
