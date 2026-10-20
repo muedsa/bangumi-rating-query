@@ -63,6 +63,8 @@ test('Archive dry-run 默认全量统计，不请求 API、不创建数据库或
         '--skip-invalid',
         '--request-retries',
         '3',
+        '--checkpoint-interval',
+        '1',
         '--api-url',
         `http://127.0.0.1:${address.port}`,
         ...extra,
@@ -202,6 +204,9 @@ test('Archive dry-run 遇到无效项默认失败，其他命令拒绝 dry-run �
   });
   await assert.rejects(run(['migrate', '--dry-run']), (error: unknown) =>
     (error as { stderr: string }).stderr.includes('--dry-run 仅支持 sync-archive'),
+  );
+  await assert.rejects(run(['migrate', '--checkpoint-interval', '20']), (error: unknown) =>
+    (error as { stderr: string }).stderr.includes('--checkpoint-interval 仅支持 sync-archive'),
   );
   assert.equal(existsSync(database), false);
   assert.equal(existsSync(`${file}.errors.jsonl`), false);
@@ -426,6 +431,131 @@ test('CLI Archive 默认重试 3 次并恢复导入和检查点，参数控制�
       counts = {};
       await assert.rejects(run(['--request-retries', invalid]));
       assert.deepEqual(counts, {}, '无效参数必须在发送请求前拒绝');
+    }
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('CLI Archive 检查点默认间隔 20，可配置并沿用原检查点，批次结束只保存一次', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bangumi-checkpoint-interval-'));
+  const file = join(dir, 'subject.jsonlines');
+  await writeFile(
+    file,
+    Array.from({ length: 45 }, (_, i) =>
+      JSON.stringify({ id: i + 1, type: (i + 1) % 2 ? 4 : 2, name: `条目${i + 1}` }),
+    ).join('\n') + '\n',
+  );
+  let state: string | null = null;
+  let failId: number | undefined;
+  let requests = 0;
+  const saved: { line: number; complete?: boolean }[] = [];
+  const imported: number[] = [];
+  const keys = new Set<string>();
+  const server = createServer(async (request, response) => {
+    requests++;
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    response.setHeader('Content-Type', 'application/json');
+    if (request.method === 'GET') {
+      keys.add(request.url!);
+      response.end(JSON.stringify({ value: state }));
+    } else if (request.method === 'PUT') {
+      keys.add(request.url!);
+      state = JSON.parse(body).value;
+      saved.push(JSON.parse(state!));
+      response.end('{}');
+    } else {
+      const id = JSON.parse(body).subject.id as number;
+      if (id === failId) {
+        response.writeHead(503);
+        response.end('{"error":"test failure"}');
+      } else {
+        imported.push(id);
+        response.end(JSON.stringify({ imported: id }));
+      }
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert(address && typeof address !== 'string');
+  const run = (extra: string[] = []) =>
+    promisify(execFile)(
+      process.execPath,
+      [
+        'dist/node/cli.js',
+        'sync-archive',
+        '--file',
+        file,
+        '--as-of',
+        '2026-01-01T00:00:00Z',
+        '--api-url',
+        `http://127.0.0.1:${address.port}`,
+        '--request-retries',
+        '0',
+        ...extra,
+      ],
+      { env: { ...process.env, ADMIN_TOKEN: token } },
+    );
+  const reset = () => {
+    state = null;
+    saved.length = 0;
+    imported.length = 0;
+  };
+  try {
+    const defaults = await run();
+    assert.equal(JSON.parse(defaults.stdout).imported, 22);
+    assert.deepEqual(
+      saved.map((entry) => entry.line),
+      [20, 40, 45],
+    );
+    assert.equal(saved.at(-1)!.complete, true);
+    const logs = defaults.stderr
+      .split('\n')
+      .filter((line) => line.startsWith('{'))
+      .map((line) => JSON.parse(line));
+    assert(logs.some((log) => log.event === 'archive_resumed' && log.checkpointInterval === 20));
+    assert(
+      logs
+        .filter((log) => log.event === 'archive_checkpoint_saved')
+        .every((log) => log.checkpointInterval === 20),
+    );
+
+    reset();
+    const limited = await run(['--checkpoint-interval', '4', '--limit', '2']);
+    assert.deepEqual(saved, [{ line: 4, skippedTotal: 0, complete: false }]);
+    assert.equal(JSON.parse(limited.stdout).complete, false);
+
+    reset();
+    failId = 22;
+    await assert.rejects(run(), (error: unknown) => {
+      const failure = error as { stderr: string };
+      assert(failure.stderr.includes('第 22 行导入失败'));
+      return true;
+    });
+    assert.deepEqual(
+      saved.map((entry) => entry.line),
+      [20],
+    );
+    assert.equal(imported.length, 10);
+    failId = undefined;
+    const resumed = await run(['--checkpoint-interval', '7']);
+    assert.equal(JSON.parse(resumed.stdout).imported, 12);
+    assert.deepEqual(
+      saved.map((entry) => entry.line),
+      [20, 21, 28, 35, 42, 45],
+    );
+    assert.deepEqual(
+      imported,
+      Array.from({ length: 22 }, (_, i) => (i + 1) * 2),
+    );
+    assert.equal(saved.at(-1)!.complete, true);
+    assert.equal(keys.size, 1, '修改检查点间隔不会改变文件版本的检查点键');
+
+    for (const invalid of ['0', '-1', '0.5', 'NaN', 'Infinity', '9007199254740992']) {
+      const before = requests;
+      await assert.rejects(run(['--checkpoint-interval', invalid]));
+      assert.equal(requests, before, '无效间隔必须在读写检查点或导入前拒绝');
     }
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));

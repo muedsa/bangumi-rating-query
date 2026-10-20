@@ -16,6 +16,7 @@ type Options = {
   file: string;
   asOf?: string;
   limit?: string;
+  checkpointInterval?: string;
   skipInvalid: boolean;
   requestDelayMs?: number;
   logger: ReturnType<typeof createCliLogger>;
@@ -41,6 +42,11 @@ export async function syncArchive(options: Options) {
           .min(1)
           .max(100000)
           .parse(options.limit ?? '1000');
+  const checkpointInterval = z.coerce
+    .number()
+    .int()
+    .min(1)
+    .parse(options.checkpointInterval ?? '20');
   let key: string | null = null;
   let state: { line: number; skippedTotal?: number } = { line: 0 };
   if (target) {
@@ -77,6 +83,7 @@ export async function syncArchive(options: Options) {
     emptyLines,
     skippedTotal,
     checkpointLine,
+    checkpointInterval,
     recordsPerSecond: Number(
       (
         (dryRun ? parsed : imported) / Math.max((performance.now() - startedAt) / 1000, 0.001)
@@ -93,6 +100,7 @@ export async function syncArchive(options: Options) {
       checkpointLine,
       skippedTotal,
       limit,
+      checkpointInterval,
       requestDelayMs: options.requestDelayMs ?? 0,
       dryRun,
     },
@@ -196,11 +204,11 @@ export async function syncArchive(options: Options) {
     } else if (typeof raw === 'object' && raw !== null && 'type' in raw && raw.type !== 2)
       ignored++;
     logger.update(progress('archive_scan'));
-    if (lineNumber % 100 === 0 || parsed === limit) await saveCheckpoint();
     if (limit !== null && parsed >= limit) {
       limited = true;
       break;
     }
+    if (lineNumber % checkpointInterval === 0) await saveCheckpoint();
   }
   await saveCheckpoint(!limited);
   const status = limited ? 'in_progress' : skippedTotal > 0 ? 'partial' : 'complete';

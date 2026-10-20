@@ -22,6 +22,7 @@ const { values, positionals } = parseArgs({
     name: { type: 'string' },
     'api-url': { type: 'string' },
     limit: { type: 'string' },
+    'checkpoint-interval': { type: 'string' },
     days: { type: 'string', default: '90' },
     'skip-invalid': { type: 'boolean', default: false },
     'dry-run': { type: 'boolean', default: false },
@@ -55,7 +56,7 @@ function required(value: string | undefined, label: string): string {
 async function main() {
   if (!command || command === 'help') {
     console.log(
-      '命令：migrate | download-archive --out 文件 | sync-archive --file 文件 [--as-of ISO时间] [--limit 1000] [--skip-invalid] [--dry-run] [--request-retries 3] | sync-subject --id ID | sync-calendar [--complete-platforms] | alias-add --id ID --name 别名 | export --out 文件 | import --file 文件 | stats | stats-prune [--days 90] | retention-preview [--days 90]\n纯解析统计：sync-archive --dry-run，不连接存储、不更新检查点，默认扫描全文件，可不指定 --as-of。\n远程 Worker / Node：追加 --api-url https://服务地址，并配置 ADMIN_TOKEN。\n远程请求间隔：--request-delay-ms 毫秒，默认 0（不延迟）。\nArchive 远程请求重试：--request-retries 次数，默认 3（首次请求之外最多重试 3 次），0 关闭；网络异常、超时和 HTTP 408/429/5xx 按 1、2、4 秒退避重试（上限 30 秒），遵循请求间隔和 Retry-After。\n日志：--log-level debug|info|warn|error|silent，默认 info；日志输出到 stderr，每 5 秒报告进度，stdout 保留命令结果。',
+      '命令：migrate | download-archive --out 文件 | sync-archive --file 文件 [--as-of ISO时间] [--limit 1000] [--checkpoint-interval 20] [--skip-invalid] [--dry-run] [--request-retries 3] | sync-subject --id ID | sync-calendar [--complete-platforms] | alias-add --id ID --name 别名 | export --out 文件 | import --file 文件 | stats | stats-prune [--days 90] | retention-preview [--days 90]\n纯解析统计：sync-archive --dry-run，不连接存储、不更新检查点，默认扫描全文件，可不指定 --as-of。\nArchive 检查点间隔：--checkpoint-interval 正整数，默认 20，按文件行号触发；达到批次上限或正常结束时也保存，dry-run 不写入。\n远程 Worker / Node：追加 --api-url https://服务地址，并配置 ADMIN_TOKEN。\n远程请求间隔：--request-delay-ms 毫秒，默认 0（不延迟）。\nArchive 远程请求重试：--request-retries 次数，默认 3（首次请求之外最多重试 3 次），0 关闭；网络异常、超时和 HTTP 408/429/5xx 按 1、2、4 秒退避重试（上限 30 秒），遵循请求间隔和 Retry-After。\n日志：--log-level debug|info|warn|error|silent，默认 info；日志输出到 stderr，每 5 秒报告进度，stdout 保留命令结果。',
     );
     return;
   }
@@ -70,6 +71,8 @@ async function main() {
   heartbeat.unref();
   if (values['request-retries'] !== undefined && command !== 'sync-archive')
     throw new Error('--request-retries 仅支持 sync-archive');
+  if (values['checkpoint-interval'] !== undefined && command !== 'sync-archive')
+    throw new Error('--checkpoint-interval 仅支持 sync-archive');
   if (values['dry-run']) {
     if (command !== 'sync-archive') throw new Error('--dry-run 仅支持 sync-archive');
     console.log(
@@ -79,6 +82,7 @@ async function main() {
           file: required(values.file, '--file'),
           asOf: values['as-of'],
           limit: values.limit,
+          checkpointInterval: values['checkpoint-interval'],
           skipInvalid: values['skip-invalid'],
           logger,
         }),
@@ -166,6 +170,7 @@ async function main() {
               file: required(values.file, '--file'),
               asOf: values['as-of'],
               limit: values.limit,
+              checkpointInterval: values['checkpoint-interval'],
               skipInvalid: values['skip-invalid'],
               requestDelayMs,
               logger,
