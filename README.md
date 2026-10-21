@@ -2,12 +2,12 @@
 
 使用 **Bun + TypeScript** 开发的纯 JSON 后端。提供两种部署方式：
 
-| 部署方式   | HTTP 入口                     | 存储   |
-| ---------- | ----------------------------- | ------ |
-| Cloudflare | Worker                        | D1     |
-| 自部署     | Node.js + Hono，可使用 Docker | SQLite |
+| 部署方式   | HTTP 入口                     | 存储                |
+| ---------- | ----------------------------- | ------------------- |
+| Cloudflare | Worker                        | D1                  |
+| 自部署     | Node.js + Hono，可使用 Docker | SQLite / PostgreSQL |
 
-两种入口共享查询业务、参数校验和 JSON 契约。业务层不依赖 Cloudflare 或 Node.js；数据库差异集中在适配器中。Drizzle 用于构造参数化 SQL，D1 与 SQLite 共用迁移 SQL。Node 使用内置 `node:sqlite`，不需要额外编译原生数据库插件。
+两种入口共享查询业务、参数校验和 JSON 契约。业务层不依赖 Cloudflare 或 Node.js；数据库差异集中在适配器中。Drizzle 用于构造参数化 SQL，D1 与 SQLite 共用迁移 SQL，PostgreSQL 使用 `migrations/postgres` 中的独立迁移。Node 的 SQLite 使用内置 `node:sqlite`，PostgreSQL 使用 Postgres.js 连接池，均无需编译原生数据库插件。
 
 ## 首版功能
 
@@ -20,11 +20,11 @@
 - **访问统计默认关闭**，开启后统计条目最近访问、累计命中、每日命中和近 7/30 天热度。
 - Archive 下载、SHA-256 校验、流式解压、分批断点导入，以及单条目 API 更新。
 - Bangumi calendar 全周日历批量导入，支持管理接口、CLI、Worker Cron 和 Node 每日调度。
-- 版本化 JSONL 备份恢复，支持 D1 与 SQLite 之间迁移，保留手动别名与统计。
+- 版本化 JSONL 备份恢复，支持 D1、SQLite、PostgreSQL 之间迁移，保留手动别名与统计。
 - 冷数据预览、每日统计清理；首版不自动淘汰条目。
 - `/openapi.json` 提供 OpenAPI 3.1 文档，无前端页面。
 
-目前只支持动画（Bangumi `type=2`）。首版不包含模糊文本搜索、繁简转换、PostgreSQL 适配器和后台队列。未收录的名称返回 `not_found`，不会自行选取最热门的相似作品。
+目前只支持动画（Bangumi `type=2`）。首版不包含模糊文本搜索、繁简转换和后台队列。未收录的名称返回 `not_found`，不会自行选取最热门的相似作品。
 
 ## 环境与安装
 
@@ -51,6 +51,34 @@ bun start
 ```
 
 默认监听 `0.0.0.0:3000`，SQLite 位于 `data/bangumi.sqlite`。Node 启动会检查并初始化空数据库；CLI 也会自动初始化本地数据库。
+
+### PostgreSQL 存储
+
+Node 服务、Docker 和直接连接数据库的 CLI 均支持 PostgreSQL。先创建数据库并给应用账号授予建表及读写权限，再在 `.env` 中配置：
+
+```dotenv
+DATABASE_DRIVER=postgres
+DATABASE_URL=postgresql://bangumi:password@127.0.0.1:5432/bangumi
+DATABASE_POOL_SIZE=10
+```
+
+然后使用相同命令：
+
+```sh
+bun run build
+bun run db:migrate
+bun start
+# 直接写入 PostgreSQL，导入和断点参数与 SQLite 相同
+bun run cli sync-archive --file data/subject.jsonlines --as-of 2026-10-20T08:18:54Z --limit 1000
+```
+
+`DATABASE_DRIVER` 默认是 `sqlite`；只有显式选择 `postgres` 才使用 `DATABASE_URL`，此时忽略 `DATABASE_PATH`。Node/CLI 会自动初始化表，但不会创建数据库本身。迁移在事务和数据库锁保护下执行，多个实例同时启动时只初始化一次；未知版本会拒绝启动。查询和批量写入共用业务层，单次批量写入使用同一连接提交或回滚。
+
+连接池默认每个进程最多 10 个连接，可用 `DATABASE_POOL_SIZE`（1～100）调整；连接超时 10 秒，单条 SQL 超时 30 秒。远程数据库可按服务商要求在连接串后添加 `?sslmode=verify-full` 启用 TLS 及证书校验；密码中的特殊字符需 URL 编码。连接串属于敏感配置，勿放入 Git、镜像构建参数或公开日志。
+
+Docker Compose 会透传这三个变量。数据库在其他容器时，连接串应使用其服务名或可访问的主机地址，容器内的 `127.0.0.1` 指向容器自身。PostgreSQL 数据由数据库服务管理，不写入应用的 SQLite 数据卷。Cloudflare Worker 仍使用 D1；CLI 带 `--api-url` 时使用目标服务的数据库配置。
+
+多实例部署时，建议只在一个实例开启 `CALENDAR_SYNC_ENABLED`，避免重复请求上游；PostgreSQL 适配器不提供分布式定时任务选主。
 
 可先导入仓库中的**虚构测试数据**验证调用流程：
 
@@ -283,7 +311,7 @@ bun run cli sync-archive --file data/subject.jsonlines --skip-invalid --limit 10
 
 结果中 `skipped` 是本次跳过数量，`skippedTotal` 是该检查点累计跳过数量。`complete=true` 仅表示已遍历文件；有跳过记录时 `status=partial`，触及批次上限时为 `in_progress`，全部遍历且无跳过时才为 `complete`。允许跳过的运行正常退出，自动化应检查 `status`，不能只凭退出码认定全部数据已入库。
 
-每次默认最多处理 1000 个有效动画条目，跳过的无效条目不占此额度。再次执行相同命令会从检查点继续，追加 `--skip-invalid` 也会复用已有检查点。检查点以文件 SHA-256 和快照时间标识，默认每 20 行以及正常结束时保存；可通过 `--checkpoint-interval` 设置保存间隔，必须为正整数，本地 SQLite 和远程 API 均支持：
+每次默认最多处理 1000 个有效动画条目，跳过的无效条目不占此额度。再次执行相同命令会从检查点继续，追加 `--skip-invalid` 也会复用已有检查点。检查点以文件 SHA-256 和快照时间标识，默认每 20 行以及正常结束时保存；可通过 `--checkpoint-interval` 设置保存间隔，必须为正整数，直接连接 SQLite/PostgreSQL 和远程 API 均支持：
 
 ```sh
 bun run cli sync-archive --file data/subject.jsonlines --limit 1000 --checkpoint-interval 50
@@ -330,7 +358,7 @@ bun run cli sync-subject --id 123 --api-url https://your-api.example.com
 bun run cli sync-archive --file data/subject.jsonlines --api-url https://your-api.example.com --as-of 2026-10-20T08:18:54Z --limit 1000 --request-delay-ms 500
 ```
 
-首次请求立即发送，之后从上一次响应体处理完毕开始等待；导入、读取和保存检查点等所有远程管理请求都使用相同间隔。其他使用 `--api-url` 的 CLI 命令也支持此选项。本地 SQLite 操作以及服务端访问 Bangumi 的请求不受该选项影响。
+首次请求立即发送，之后从上一次响应体处理完毕开始等待；导入、读取和保存检查点等所有远程管理请求都使用相同间隔。其他使用 `--api-url` 的 CLI 命令也支持此选项。直接连接 SQLite/PostgreSQL 的操作以及服务端访问 Bangumi 的请求不受该选项影响。
 
 `sync-archive` 的远程请求默认失败后最多**额外重试 3 次**，即每个请求最多发送 4 次。使用 `--request-retries` 指定非负整数，设为 `0` 可关闭重试：
 
@@ -345,7 +373,7 @@ bun run cli sync-archive --file data/subject.jsonlines --api-url https://your-ap
 
 默认日志会以 `warn` 输出 `api_request_retry`，包含 `attempt`（当前失败的是第几次请求）、`retry`（即将执行第几次重试）、`requestRetries`（重试上限）、`waitMs`、HTTP 状态及请求关联信息。重试耗尽后以 `error` 输出 `api_request_failed`，命令非零退出；`--skip-invalid` 不会跳过这些请求失败，也不会推进失败条目的检查点。稍后执行相同文件和 `--as-of` 的命令即可续跑。
 
-`--request-retries` 仅支持 `sync-archive` 的远程管理请求，不影响本地 SQLite、`--dry-run` 或服务端访问 Bangumi 的重试策略。其他 CLI 命令保持不自动重试。
+`--request-retries` 仅支持 `sync-archive` 的远程管理请求，不影响直接连接 SQLite/PostgreSQL、`--dry-run` 或服务端访问 Bangumi 的重试策略。其他 CLI 命令保持不自动重试。
 
 Archive 和单条目更新可用系统定时任务、CI 等周期执行以上 CLI；Archive 分批初始化尤其需要按 D1 当日写入余量决定批次，不建议一次无预算地导入全库。calendar 日历更新另有内置定时任务，见下文。
 
@@ -461,7 +489,7 @@ bun run cli export --out cloudflare-backup.jsonl --api-url https://your-worker.e
 
 JSONL 每行包含 `version:1`、条目、全部来源别名、当前评分、累计及每日统计。导出输出文件 SHA-256；写入完成前使用 `.partial` 文件。同步检查点属于环境运行状态，不包含在业务备份中。
 
-恢复到**空数据库**：修改 `DATABASE_PATH` 指向新的文件后执行：
+恢复到**空数据库**：SQLite 修改 `DATABASE_PATH` 指向新的文件；PostgreSQL 设置 `DATABASE_DRIVER=postgres` 和指向空目标库的 `DATABASE_URL`，然后执行：
 
 ```sh
 bun run cli import --file backup.jsonl
@@ -483,7 +511,10 @@ bun run cli import --file backup.jsonl --api-url https://your-worker.example.com
 | ------------------------------ | --------------------------------------- | ----------------------------------------------------------------------------- |
 | `HOST`                         | `0.0.0.0`                               | Node 监听地址                                                                 |
 | `PORT`                         | `3000`                                  | Node 端口                                                                     |
-| `DATABASE_PATH`                | `./data/bangumi.sqlite`                 | Node/本地 CLI 数据库                                                          |
+| `DATABASE_DRIVER`              | `sqlite`                                | Node/直接连接数据库的 CLI：`sqlite` 或 `postgres`                             |
+| `DATABASE_PATH`                | `./data/bangumi.sqlite`                 | SQLite 数据库文件                                                             |
+| `DATABASE_URL`                 | 无                                      | PostgreSQL 连接串；选择 `postgres` 时必填                                     |
+| `DATABASE_POOL_SIZE`           | `10`                                    | PostgreSQL 每进程最大连接数，范围 1～100                                      |
 | `ADMIN_TOKEN`                  | 空                                      | 空值关闭管理 API；非空至少 32 字符                                            |
 | `STATS_ENABLED`                | `false`                                 | 仅接受 `true` / `false`                                                       |
 | `MAX_BATCH_SIZE`               | `20`                                    | 允许 1～20                                                                    |
@@ -522,6 +553,8 @@ bun run check
 项目使用 Prettier 统一格式，`bun run check` 包含格式检查、类型检查、单元测试、构建和集成测试；GitHub Actions 使用相同入口。开发和贡献约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 `bun test` 只执行 Bun 单元测试；集成测试由 Node 运行，启动真实 Node HTTP 服务及 Miniflare/workerd 本地 Worker+D1，覆盖统计开关、别名冲突、同步时间保护、统计失败隔离、SQL 参数化、CLI 断点和数据库跨适配器往返。
+
+PostgreSQL 集成测试默认启动内存中的 PGlite TCP 服务，使用实际 Postgres.js 驱动验证迁移、查询和事务；PGlite 及其 TCP 包仅为开发依赖，不进入服务镜像。设置 `TEST_POSTGRES_URL` 后改为连接真实 PostgreSQL（测试账号需有建 schema 的权限），每项测试创建并清理独立 schema，不使用应用的 `DATABASE_URL`。GitHub Actions 使用 PostgreSQL 18 服务，并额外验证多实例并发迁移；本地 PGlite 不验证此项跨会话锁行为。
 
 未将本地 Worker 测试等同于真实 Cloudflare 免费配额测试，也未进行全量 Archive 导入或生产压测。Docker 配置应在有 Docker 的环境中构建验证。
 

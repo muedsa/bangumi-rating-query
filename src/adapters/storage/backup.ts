@@ -1,6 +1,6 @@
 import { AppError } from '../../core/models.ts';
 import { backupSchema, type BackupRecord } from '../../core/backup.ts';
-import { chunks, compile, sql } from './sql.ts';
+import { chunks, sql } from './sql.ts';
 import type { SqlRepository } from './repository.ts';
 
 export async function exportPage(repo: SqlRepository, after: number, limit = 5) {
@@ -15,7 +15,7 @@ export async function exportPage(repo: SqlRepository, after: number, limit = 5) 
     const usage =
       (
         await repo.query<BackupRecord['usage']>(
-          sql`SELECT last_accessed_at AS lastAccessedAt, total_hits AS totalHits FROM subject_usage WHERE subject_id=${id}`,
+          sql`SELECT last_accessed_at AS "lastAccessedAt", total_hits AS "totalHits" FROM subject_usage WHERE subject_id=${id}`,
         )
       )[0] ?? null;
     const daily = await repo.query<BackupRecord['daily'][number]>(
@@ -57,8 +57,8 @@ export async function restoreRecord(repo: SqlRepository, input: BackupRecord) {
     );
   if (record.daily.length)
     statements.push(sql`INSERT INTO subject_usage_daily(subject_id,day,hits)
-    SELECT ${s.id}, json_extract(value, '$.day'), json_extract(value, '$.hits') FROM json_each(${JSON.stringify(record.daily)})`);
+    SELECT ${s.id}, ${repo.dialect.value('day')}, ${repo.dialect.value('hits', 'integer')} FROM ${repo.dialect.each(record.daily)}`);
   if (statements.length > 40)
     throw new AppError(400, 'BACKUP_TOO_LARGE', '单条备份超出事务预算，请先归档历史统计');
-  await repo.driver.batch(statements.map(compile));
+  await repo.batch(statements);
 }

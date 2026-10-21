@@ -10,10 +10,13 @@
         "drizzle-orm": "^0.45.4",
         "fflate": "^0.8.3",
         "hono": "^4.13.13",
+        "postgres": "^3.4.9",
         "zod": "^4.6.7",
       },
       "devDependencies": {
         "@cloudflare/workers-types": "^5.20261019.1",
+        "@electric-sql/pglite": "^0.5.10",
+        "@electric-sql/pglite-socket": "^0.2.13",
         "@types/bun": "^1.4.3",
         "@types/node": "^26.6.5",
         "miniflare": "^5.20261019.0-beta",
@@ -43,6 +46,24 @@
     "@cloudflare/workers-types": ["@cloudflare/workers-types@5.20261019.1", "https://registry.npmmirror.com/@cloudflare/workers-types/-/workers-types-5.20261019.1.tgz", {}, "sha512-llvvy7WBVhK+OfykyBkG9A7OgsGvgwHSNyU40XGVkiy/xVFy0t/xflyhEBHT+U59yQECZQbmcZsJtqCNnLpIRg=="],
 
     "@cspotcode/source-map-support": ["@cspotcode/source-map-support@0.8.1", "https://registry.npmmirror.com/@cspotcode/source-map-support/-/source-map-support-0.8.1.tgz", { "dependencies": { "@jridgewell/trace-mapping": "0.3.9" } }, "sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw=="],
+
+    "@electric-sql/pglite": ["@electric-sql/pglite@0.5.10", "https://registry.npmmirror.com/@electric-sql/pglite/-/pglite-0.5.10.tgz", {}, "sha512-tXc/25U3ulOkiRQuTFdwIv+JhBqtMdAF7Gvo6CfZZWtSB4+hgC4Wr2vwK5ngvvN5PJfAAEGIsfyCVy1JhCOBYw=="],
+
+    "@electric-sql/pglite-age": ["@electric-sql/pglite-age@0.0.11", "https://registry.npmmirror.com/@electric-sql/pglite-age/-/pglite-age-0.0.11.tgz", { "peerDependencies": { "@electric-sql/pglite": "0.5.10" } }, "sha512-SpgPLSAp6bz4jno7soLSIvu3HeOlgxAlyOL5r+AaAWYdBSdy9QzVGYbWz1YG+UaK40uppEviCkDZs/OCnby/mw=="],
+
+    "@electric-sql/pglite-pg_hashids": ["@electric-sql/pglite-pg_hashids@0.0.11", "https://registry.npmmirror.com/@electric-sql/pglite-pg_hashids/-/pglite-pg_hashids-0.0.11.tgz", { "peerDependencies": { "@electric-sql/pglite": "0.5.10" } }, "sha512-LCnIPhmeYsU6wBsxcS253pwoGn9FYGopjieq0rtcFjuV0KGoXMMhVI/wNVkDDp+UJlsWWx/4HDang9/0UDPj+A=="],
+
+    "@electric-sql/pglite-pg_ivm": ["@electric-sql/pglite-pg_ivm@0.0.11", "https://registry.npmmirror.com/@electric-sql/pglite-pg_ivm/-/pglite-pg_ivm-0.0.11.tgz", { "peerDependencies": { "@electric-sql/pglite": "0.5.10" } }, "sha512-hx9b0r7XOv7+s8BHYbQF8CnhRgrJtx3MsCmce0S94EWkLrc0oIDyespl/yg0bjXSjPoj0dXG9Pbpn1ScezutXg=="],
+
+    "@electric-sql/pglite-pg_textsearch": ["@electric-sql/pglite-pg_textsearch@0.0.12", "https://registry.npmmirror.com/@electric-sql/pglite-pg_textsearch/-/pglite-pg_textsearch-0.0.12.tgz", { "peerDependencies": { "@electric-sql/pglite": "0.5.10" } }, "sha512-4w+XqCu0kVPOdpTTP1OERkJejqhjQ2NaFBGIpfR7VWaPaGYvReLgLISmblo4ik+MvIweO5obgwmwOe41AkQ6Jw=="],
+
+    "@electric-sql/pglite-pg_uuidv7": ["@electric-sql/pglite-pg_uuidv7@0.0.11", "https://registry.npmmirror.com/@electric-sql/pglite-pg_uuidv7/-/pglite-pg_uuidv7-0.0.11.tgz", { "peerDependencies": { "@electric-sql/pglite": "0.5.10" } }, "sha512-bMmPYmncxuDyBZDOFzrRa/nI4yYzHVNpE+vTD9lXVTM1V4C+G6N4hRoJbEnmycSlMbEIKbAlXT7CLPBZ/cswrQ=="],
+
+    "@electric-sql/pglite-pgtap": ["@electric-sql/pglite-pgtap@0.0.11", "https://registry.npmmirror.com/@electric-sql/pglite-pgtap/-/pglite-pgtap-0.0.11.tgz", { "peerDependencies": { "@electric-sql/pglite": "0.5.10" } }, "sha512-G9apu/VxUlt9k6if60YJ6FmJbM3mY6cEs11sIGEgaOfORRDAtT9oKSpXzyfDGga7QVZwFkiGY/Ez1BaX73OCew=="],
+
+    "@electric-sql/pglite-pgvector": ["@electric-sql/pglite-pgvector@0.0.11", "https://registry.npmmirror.com/@electric-sql/pglite-pgvector/-/pglite-pgvector-0.0.11.tgz", { "peerDependencies": { "@electric-sql/pglite": "0.5.10" } }, "sha512-pUukU2iqI5TLBv/0D5Bk9R9zVyms+7Do6yscl4WRKW5pD2wNl8FlzGWDXphXj/Q42SsVIJHbP4+oqwjQC9fasg=="],
+
+    "@electric-sql/pglite-socket": ["@electric-sql/pglite-socket@0.2.13", "https://registry.npmmirror.com/@electric-sql/pglite-socket/-/pglite-socket-0.2.13.tgz", { "peerDependencies": { "@electric-sql/pglite": "0.5.10", "@electric-sql/pglite-age": "0.0.11", "@electric-sql/pglite-pg_hashids": "0.0.11", "@electric-sql/pglite-pg_ivm": "0.0.11", "@electric-sql/pglite-pg_textsearch": "0.0.12", "@electric-sql/pglite-pg_uuidv7": "0.0.11", "@electric-sql/pglite-pgtap": "0.0.11", "@electric-sql/pglite-pgvector": "0.0.11" }, "bin": { "pglite-server": "dist/scripts/server.js" } }, "sha512-z6kydnOvL5A4Y46bUQD3gZxi+cMJZFm700h9g+tMj11Z5rbhpozkFg2rK3Ln3BIjaHXkJogAR7UEj/qWtRBMKA=="],
 
     "@emnapi/runtime": ["@emnapi/runtime@1.11.3", "https://registry.npmmirror.com/@emnapi/runtime/-/runtime-1.11.3.tgz", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA=="],
 
@@ -241,6 +262,8 @@
     "path-to-regexp": ["path-to-regexp@6.3.0", "https://registry.npmmirror.com/path-to-regexp/-/path-to-regexp-6.3.0.tgz", {}, "sha512-Yhpw4T9C6hPpgPeA28us07OJeqZ5EzQTkbfwuhsUg0c237RomFoETJgmp2sa3F/41gfLE6G5cqcYwznmeEeOlQ=="],
 
     "pathe": ["pathe@2.0.3", "https://registry.npmmirror.com/pathe/-/pathe-2.0.3.tgz", {}, "sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w=="],
+
+    "postgres": ["postgres@3.4.9", "https://registry.npmmirror.com/postgres/-/postgres-3.4.9.tgz", {}, "sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw=="],
 
     "prettier": ["prettier@3.9.10", "https://registry.npmmirror.com/prettier/-/prettier-3.9.10.tgz", { "bin": { "prettier": "bin/prettier.cjs" } }, "sha512-skGHTH1Yb9QvaTC4hWnRTzEYtCpApF0UMBPz+t/0ZPzP8ihefo/btKd+QA7pUE0fEwA1SbS/NmhyEcstdXOIdA=="],
 

@@ -1,14 +1,17 @@
 import type { ImportRecord } from '../core/models.ts';
 import type { BackupRecord } from '../core/backup.ts';
 import { SqlRepository } from '../adapters/storage/repository.ts';
-import { SqliteDriver } from '../adapters/storage/sqlite.ts';
+import { openStorage } from '../adapters/storage/node.ts';
 import { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import type { CalendarSource } from '../core/ports.ts';
 export { remoteTarget } from './remote-target.ts';
 
-export function localTarget(path: string, calendarSource?: CalendarSource, platformBatchSize = 10) {
-  const driver = new SqliteDriver(path);
-  driver.migrate();
+export async function localTarget(
+  env: Record<string, unknown>,
+  calendarSource?: CalendarSource,
+  platformBatchSize = 10,
+) {
+  const driver = await openStorage(env);
   const repo = new SqlRepository(driver);
   return {
     close: () => driver.close(),

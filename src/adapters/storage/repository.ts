@@ -11,20 +11,34 @@ import {
   type Subject,
 } from '../../core/models.ts';
 import { normalizeName } from '../../core/matching.ts';
-import { chunks, compile, list, sql, type Row, type SqlDriver } from './sql.ts';
+import {
+  chunks,
+  isUniqueViolation,
+  list,
+  sql,
+  StorageDialect,
+  type Row,
+  type SqlDriver,
+} from './sql.ts';
 import { aliasInsertStatement } from './season-aliases.ts';
 
-const subjectColumns = sql`id, name, name_cn AS nameCn, air_date AS airDate, platform,
-  metadata_at AS metadataAt, cached_at AS cachedAt, pinned`;
-const aliasColumns = sql`id, subject_id AS subjectId, name, normalized_name AS normalizedName,
-  source, created_at AS createdAt, updated_at AS updatedAt`;
-const ratingColumns = sql`subject_id AS subjectId, score, votes, rank, source,
-  data_as_of AS dataAsOf, fetched_at AS fetchedAt`;
+const subjectColumns = sql`id, name, name_cn AS "nameCn", air_date AS "airDate", platform,
+  metadata_at AS "metadataAt", cached_at AS "cachedAt", pinned`;
+const aliasColumns = sql`id, subject_id AS "subjectId", name, normalized_name AS "normalizedName",
+  source, created_at AS "createdAt", updated_at AS "updatedAt"`;
+const ratingColumns = sql`subject_id AS "subjectId", score, votes, rank, source,
+  data_as_of AS "dataAsOf", fetched_at AS "fetchedAt"`;
 
 export class SqlRepository implements ApplicationRepository {
-  constructor(public readonly driver: SqlDriver) {}
+  readonly dialect: StorageDialect;
+  constructor(public readonly driver: SqlDriver) {
+    this.dialect = new StorageDialect(driver.dialect);
+  }
   async query<T>(q: SQL): Promise<T[]> {
-    return (await this.driver.query(compile(q))) as T[];
+    return (await this.driver.query(this.dialect.compile(q))) as T[];
+  }
+  batch(statements: SQL[]) {
+    return this.driver.batch(statements.map((statement) => this.dialect.compile(statement)));
   }
   exportPage(after: number) {
     return exportPage(this, after);
@@ -35,15 +49,15 @@ export class SqlRepository implements ApplicationRepository {
   async findMissingPlatformIds(ids: number[]) {
     if (!ids.length) return [];
     const rows = await this.query<{ id: number }>(sql`SELECT id FROM subjects
-      WHERE trim(platform)='' AND id IN (SELECT value FROM json_each(${JSON.stringify(ids)})) ORDER BY id`);
+      WHERE trim(platform)='' AND id IN (${this.dialect.values(ids, 'integer')}) ORDER BY id`);
     return rows.map((row) => row.id);
   }
   async fillPlatforms(items: { id: number; platform: string }[]) {
     if (!items.length) return 0;
     const rows = await this.query(sql`UPDATE subjects SET platform=(
-      SELECT json_extract(value,'$.platform') FROM json_each(${JSON.stringify(items)}) WHERE json_extract(value,'$.id')=subjects.id
+      SELECT ${this.dialect.value('platform')} FROM ${this.dialect.each(items)} WHERE ${this.dialect.value('id', 'integer')}=subjects.id
     ) WHERE trim(platform)='' AND id IN (
-      SELECT json_extract(value,'$.id') FROM json_each(${JSON.stringify(items)})
+      SELECT ${this.dialect.value('id', 'integer')} FROM ${this.dialect.each(items)}
     ) RETURNING id`);
     return rows.length;
   }
@@ -59,11 +73,12 @@ export class SqlRepository implements ApplicationRepository {
       })),
     );
     const statements: SQL[] = [];
+    const d = this.dialect;
     // 使用 JSON 参数批量导入，避免每个条目消耗多次 D1 查询。
     if (items.length)
       statements.push(sql`INSERT INTO subjects(id,name,name_cn,air_date,platform,metadata_at,cached_at,pinned)
-      SELECT json_extract(value,'$.id'),json_extract(value,'$.name'),json_extract(value,'$.nameCn'),
-        json_extract(value,'$.airDate'),'',0,${now},0 FROM json_each(${JSON.stringify(items)}) WHERE true
+      SELECT ${d.value('id', 'integer')},${d.value('name')},${d.value('nameCn')},
+        ${d.value('airDate')},'',0,${now},0 FROM ${d.each(items)} WHERE true
       ON CONFLICT(id) DO NOTHING`);
     // 日历只有名称；只补充名称，绝不删除已有官方/手动别名。
     const aliasInsert = await aliasInsertStatement(this, aliases, now, { skipFullSubjects: true });
@@ -71,8 +86,8 @@ export class SqlRepository implements ApplicationRepository {
     const ratings = items.filter((item) => item.rating !== null);
     if (ratings.length)
       statements.push(sql`INSERT INTO ratings_current(subject_id,score,votes,rank,source,data_as_of,fetched_at)
-      SELECT json_extract(value,'$.id'),json_extract(value,'$.rating.score'),json_extract(value,'$.rating.votes'),
-        NULL,'api',${now},${now} FROM json_each(${JSON.stringify(ratings)}) WHERE true
+      SELECT ${d.value('id', 'integer')},${d.value('rating.score', 'real')},${d.value('rating.votes', 'integer')},
+        NULL,'api',${now},${now} FROM ${d.each(ratings)} WHERE true
       ON CONFLICT(subject_id) DO UPDATE SET score=excluded.score,votes=excluded.votes,
         source=excluded.source,data_as_of=excluded.data_as_of,fetched_at=excluded.fetched_at
       WHERE excluded.data_as_of > ratings_current.data_as_of`);
@@ -80,7 +95,7 @@ export class SqlRepository implements ApplicationRepository {
       VALUES('calendar:last_sync',${JSON.stringify({ imported: items.length, dataAsOf: new Date(now).toISOString() })},${now})
       ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
       WHERE excluded.updated_at >= sync_state.updated_at`);
-    await this.driver.batch(statements.map(compile));
+    await this.batch(statements);
   }
   async ready() {
     const rows = await this.query<{ version: number }>(sql`SELECT version FROM schema_version`);
@@ -132,7 +147,7 @@ export class SqlRepository implements ApplicationRepository {
       [{ subjectId, name, source: 'manual' }],
       now,
     );
-    if (statement) await this.driver.batch([compile(statement)]);
+    if (statement) await this.batch([statement]);
     const rows = await this.query<Alias>(sql`SELECT ${aliasColumns} FROM subject_aliases
       WHERE subject_id=${subjectId} AND name=${name} AND source='manual'`);
     return rows[0]!;
@@ -160,10 +175,10 @@ export class SqlRepository implements ApplicationRepository {
         updated_at = ${now} WHERE id = ${id} AND source = 'manual' RETURNING ${aliasColumns}`,
       ];
       if (aliasInsert) statements.push(aliasInsert);
-      const rows = await this.driver.batch(statements.map(compile));
+      const rows = await this.batch(statements);
       return (rows[0]?.[0] as Alias | undefined) ?? null;
     } catch (error) {
-      if (String(error).includes('UNIQUE constraint'))
+      if (isUniqueViolation(error))
         throw new AppError(409, 'ALIAS_EXISTS', '该条目已有相同手动别名');
       throw error;
     }
@@ -209,7 +224,7 @@ export class SqlRepository implements ApplicationRepository {
           source=excluded.source, data_as_of=excluded.data_as_of, fetched_at=excluded.fetched_at
         WHERE excluded.data_as_of > ratings_current.data_as_of`);
     }
-    if (statements.length) await this.driver.batch(statements.map(compile));
+    if (statements.length) await this.batch(statements);
   }
   async recordHits(ids: number[], now: number) {
     const day = new Date(now).toISOString().slice(0, 10);
@@ -221,7 +236,8 @@ export class SqlRepository implements ApplicationRepository {
           sql`, `,
         )}
         ON CONFLICT(subject_id) DO UPDATE SET total_hits=subject_usage.total_hits+1,
-          last_accessed_at=MAX(subject_usage.last_accessed_at, excluded.last_accessed_at)`);
+          last_accessed_at=CASE WHEN subject_usage.last_accessed_at > excluded.last_accessed_at
+            THEN subject_usage.last_accessed_at ELSE excluded.last_accessed_at END`);
       statements.push(sql`INSERT INTO subject_usage_daily (subject_id, day, hits)
         VALUES ${sql.join(
           part.map((id) => sql`(${id}, ${day}, 1)`),
@@ -229,7 +245,7 @@ export class SqlRepository implements ApplicationRepository {
         )}
         ON CONFLICT(subject_id, day) DO UPDATE SET hits=subject_usage_daily.hits+1`);
     }
-    if (statements.length) await this.driver.batch(statements.map(compile));
+    if (statements.length) await this.batch(statements);
   }
   async getState(key: string) {
     return (
@@ -245,13 +261,14 @@ export class SqlRepository implements ApplicationRepository {
   async stats(now = Date.now()) {
     const since7 = new Date(now - 6 * 86400000).toISOString().slice(0, 10);
     const since30 = new Date(now - 29 * 86400000).toISOString().slice(0, 10);
-    return this.query<Row>(sql`SELECT u.subject_id AS subjectId, s.name, u.total_hits AS totalHits,
-      u.last_accessed_at AS lastAccessedAt,
-      COALESCE(SUM(CASE WHEN d.day >= ${since7} THEN d.hits ELSE 0 END),0) AS hits7d,
-      COALESCE(SUM(d.hits),0) AS hits30d
+    return this
+      .query<Row>(sql`SELECT u.subject_id AS "subjectId", s.name, u.total_hits AS "totalHits",
+      u.last_accessed_at AS "lastAccessedAt",
+      COALESCE(SUM(CASE WHEN d.day >= ${since7} THEN d.hits ELSE 0 END),0) AS "hits7d",
+      COALESCE(SUM(d.hits),0) AS "hits30d"
       FROM subject_usage u JOIN subjects s ON s.id=u.subject_id
       LEFT JOIN subject_usage_daily d ON d.subject_id=u.subject_id AND d.day>=${since30}
-      GROUP BY u.subject_id ORDER BY hits30d DESC, u.subject_id LIMIT 100`);
+      GROUP BY u.subject_id, s.name, u.total_hits, u.last_accessed_at ORDER BY "hits30d" DESC, u.subject_id LIMIT 100`);
   }
   async retentionPreview(days: number, statsEnabled: boolean, now = Date.now()) {
     if (!statsEnabled)
@@ -261,16 +278,16 @@ export class SqlRepository implements ApplicationRepository {
         candidates: [],
       };
     const cutoff = now - days * 86400000;
-    const candidates = await this.query<Row>(sql`SELECT s.id, s.name, s.cached_at AS cachedAt,
-      u.last_accessed_at AS lastAccessedAt FROM subjects s LEFT JOIN subject_usage u ON u.subject_id=s.id
+    const candidates = await this.query<Row>(sql`SELECT s.id, s.name, s.cached_at AS "cachedAt",
+      u.last_accessed_at AS "lastAccessedAt" FROM subjects s LEFT JOIN subject_usage u ON u.subject_id=s.id
       WHERE s.pinned=0 AND s.cached_at < ${cutoff} AND COALESCE(u.last_accessed_at, s.cached_at) < ${cutoff}
       ORDER BY s.id LIMIT 100`);
     return { actionable: false, reason: '仅预览；统计可能不完整，首版不自动删除', candidates };
   }
   async pruneDaily(days: number, now = Date.now()) {
     const cutoff = new Date(now - (days - 1) * 86400000).toISOString().slice(0, 10);
-    const rows = await this.query(sql`DELETE FROM subject_usage_daily WHERE rowid IN (
-      SELECT rowid FROM subject_usage_daily WHERE day < ${cutoff} ORDER BY day LIMIT 1000
+    const rows = await this.query(sql`DELETE FROM subject_usage_daily WHERE (subject_id, day) IN (
+      SELECT subject_id, day FROM subject_usage_daily WHERE day < ${cutoff} ORDER BY day, subject_id LIMIT 1000
     ) RETURNING subject_id`);
     return { deleted: rows.length, hasMore: rows.length === 1000 };
   }

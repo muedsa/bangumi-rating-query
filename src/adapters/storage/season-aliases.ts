@@ -3,10 +3,11 @@ import { normalizeName } from '../../core/matching.ts';
 import { seasonAlias } from '../../core/season-aliases.ts';
 import type { SQL } from 'drizzle-orm';
 import { sql } from './sql.ts';
+import type { SqlRepository } from './repository.ts';
 
 type Seed = Pick<Alias, 'subjectId' | 'name' | 'source'>;
 type Match = Seed & Pick<Alias, 'normalizedName'>;
-type Reader = { query<T>(query: SQL): Promise<T[]> };
+type Reader = Pick<SqlRepository, 'query' | 'dialect'>;
 
 /** 在同一事务中写入原别名、季数互补别名及唯一匹配的第一季别名。 */
 export async function aliasInsertStatement(
@@ -21,8 +22,9 @@ export async function aliasInsertStatement(
   } = {},
 ): Promise<SQL | null> {
   if (!seeds.length) return null;
+  const d = repo.dialect;
   const retained = sql`NOT (source='bangumi' AND subject_id IN (
-    SELECT value FROM json_each(${JSON.stringify(options.replaceBangumiIds ?? [])})
+    ${d.values(options.replaceBangumiIds ?? [], 'integer')}
   )) AND id <> ${options.removeAliasId ?? ''}`;
   const keys = new Set<string>();
   const secondNames = (name: string) =>
@@ -46,9 +48,9 @@ export async function aliasInsertStatement(
         keys.add(normalizeName(name));
     }
   }
-  const existing = await repo.query<Match>(sql`SELECT subject_id AS subjectId, name,
-    normalized_name AS normalizedName, source FROM subject_aliases
-    WHERE ${retained} AND normalized_name IN (SELECT value FROM json_each(${JSON.stringify([...keys])}))`);
+  const existing = await repo.query<Match>(sql`SELECT subject_id AS "subjectId", name,
+    normalized_name AS "normalizedName", source FROM subject_aliases
+    WHERE ${retained} AND normalized_name IN (${d.values([...keys], 'text')})`);
   const matches = new Map<string, Match[]>();
   const addMatch = (alias: Match) => {
     const list = matches.get(alias.normalizedName) ?? [];
@@ -105,8 +107,8 @@ export async function aliasInsertStatement(
       await repo.query<{
         subjectId: number;
         count: number;
-      }>(sql`SELECT subject_id AS subjectId, COUNT(*) AS count
-      FROM subject_aliases WHERE ${retained} AND subject_id IN (SELECT value FROM json_each(${JSON.stringify(ids)}))
+      }>(sql`SELECT subject_id AS "subjectId", COUNT(*) AS count
+      FROM subject_aliases WHERE ${retained} AND subject_id IN (${d.values(ids, 'integer')})
       GROUP BY subject_id`)
     ).map((row) => [row.subjectId, row.count]),
   );
@@ -123,8 +125,8 @@ export async function aliasInsertStatement(
     }));
   if (!additions.length) return null;
   return sql`INSERT INTO subject_aliases(id,subject_id,name,normalized_name,source,created_at,updated_at)
-    SELECT json_extract(value,'$.id'),json_extract(value,'$.subjectId'),json_extract(value,'$.name'),
-      json_extract(value,'$.normalizedName'),json_extract(value,'$.source'),${now},${now}
-    FROM json_each(${JSON.stringify(additions)}) WHERE ${options.guard ?? sql`true`}
+    SELECT ${d.value('id')},${d.value('subjectId', 'integer')},${d.value('name')},
+      ${d.value('normalizedName')},${d.value('source')},${now},${now}
+    FROM ${d.each(additions)} WHERE ${options.guard ?? sql`true`}
     ON CONFLICT(subject_id,name,source) DO NOTHING`;
 }

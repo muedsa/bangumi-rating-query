@@ -1,6 +1,6 @@
 # 参与开发
 
-本项目是基于 Bun + TypeScript 的 JSON 后端，提供 Cloudflare Worker + D1 和 Node.js + SQLite 两种运行方式。
+本项目是基于 Bun + TypeScript 的 JSON 后端，提供 Cloudflare Worker + D1 和 Node.js + SQLite/PostgreSQL 两种运行方式。
 
 ## 准备环境
 
@@ -32,7 +32,7 @@ bun run check
 
 - 提交信息遵循 Conventional Commits，描述尽量使用中文，例如 `fix(cli): 修复远程导入检查点日志`。
 - PR 说明具体问题、修改后的行为和实际执行的验证；文档尽量使用中文。
-- 修改共享业务或 SQL 时，应确认 Node/SQLite 与 Worker/D1 两种运行方式均适用。修复缺陷时添加能复现问题的回归测试。
+- 修改共享业务或 SQL 时，应确认 SQLite、D1、PostgreSQL 三种存储均适用；方言差异集中在存储适配器，PostgreSQL 迁移独立放在 `migrations/postgres`。修复缺陷时添加能复现问题的回归测试。
 - 修改 API、配置或 CLI 参数时，同步更新 README；涉及接口契约时也应更新 OpenAPI。
 - 不提交真实 Token、`.env`、`.dev.vars`、数据库、Archive 文件、备份或运行日志。使用虚构数据制作最小复现；提交日志前移除凭证和个人信息。
 

@@ -18,6 +18,8 @@ import { extractSubjects } from '../src/cli/archive.ts';
 import type { ImportRecord } from '../src/core/models.ts';
 import { batchResponseSchema } from '../src/http/openapi.ts';
 import { BangumiClient } from '../src/adapters/bangumi/client.ts';
+import { postgresTestDatabase } from './helpers/postgres.ts';
+import './postgres.ts';
 
 const token = 'integration-test-token-with-32-characters';
 const migration = readFileSync('migrations/0001_initial.sql', 'utf8');
@@ -70,7 +72,13 @@ test('Archive dry-run 默认全量统计，不请求 API、不创建数据库或
         ...extra,
       ],
       {
-        env: { ...process.env, DATABASE_PATH: database, ADMIN_TOKEN: '', STATS_ENABLED: 'invalid' },
+        env: {
+          ...process.env,
+          DATABASE_DRIVER: 'sqlite',
+          DATABASE_PATH: database,
+          ADMIN_TOKEN: '',
+          STATS_ENABLED: 'invalid',
+        },
       },
     );
   try {
@@ -144,6 +152,7 @@ test('Archive dry-run 从首行统计，保留已有数据、错误文件与检�
       {
         env: {
           ...process.env,
+          DATABASE_DRIVER: 'sqlite',
           DATABASE_PATH: database,
           ADMIN_TOKEN: token,
           STATS_ENABLED: 'false',
@@ -185,7 +194,7 @@ test('Archive dry-run 遇到无效项默认失败，其他命令拒绝 dry-run �
   await writeFile(file, JSON.stringify({ id: 1, type: 2, name: '有效动画' }) + '\n{invalid json\n');
   const run = (args: string[]) =>
     promisify(execFile)(process.execPath, ['dist/node/cli.js', ...args], {
-      env: { ...process.env, DATABASE_PATH: database, ADMIN_TOKEN: '' },
+      env: { ...process.env, DATABASE_DRIVER: 'sqlite', DATABASE_PATH: database, ADMIN_TOKEN: '' },
     });
   await assert.rejects(run(['sync-archive', '--file', file, '--dry-run']), (error: unknown) => {
     const { stderr, stdout } = error as { stderr: string; stdout: string };
@@ -588,7 +597,7 @@ function fixture(id: number, name: string, aliases = ['共同别名'], year = 20
 }
 
 async function runtime(
-  kind: 'node' | 'worker',
+  kind: 'node' | 'worker' | 'postgres',
   enabled: boolean,
   bangumi?: {
     userAgent: string;
@@ -599,9 +608,10 @@ async function runtime(
   },
 ) {
   const logs: string[] = [];
-  if (kind === 'node') {
-    const driver = new SqliteDriver(':memory:');
-    driver.migrate();
+  if (kind !== 'worker') {
+    const pg = kind === 'postgres' ? await postgresTestDatabase() : undefined;
+    const driver = pg?.driver ?? new SqliteDriver(':memory:');
+    await driver.migrate();
     const source = bangumi
       ? new BangumiClient(bangumi.userAgent, {
           accessToken: bangumi.accessToken,
@@ -636,7 +646,8 @@ async function runtime(
       sql: async (sql: string) => driver.query({ sql, params: [] }),
       close: async () => {
         await new Promise<void>((resolve) => server.close(() => resolve()));
-        driver.close();
+        if (pg) await pg.close();
+        else await driver.close();
       },
     };
   }
@@ -698,7 +709,7 @@ async function runtime(
   };
 }
 
-for (const kind of ['node', 'worker'] as const) {
+for (const kind of ['node', 'worker', 'postgres'] as const) {
   test(`${kind}: 导入与手动别名互补季数，补全第一季并支持反向导入和幂等刷新`, async () => {
     const target = await runtime(kind, false);
     const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -858,7 +869,9 @@ for (const kind of ['node', 'worker'] as const) {
       assert.equal(((await tooLong.json()) as any).error.code, 'ALIAS_TOO_LONG');
       assert.equal((await send('/api/v1/admin/import', fixture(650, '事务', []))).status, 200);
       await target.sql(
-        "CREATE TRIGGER reject_season BEFORE INSERT ON subject_aliases WHEN NEW.name='事务第一季' BEGIN SELECT RAISE(ABORT, 'season test failure'); END",
+        kind === 'postgres'
+          ? "CREATE FUNCTION reject_season() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.name='事务第一季' THEN RAISE EXCEPTION 'season test failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_season BEFORE INSERT ON subject_aliases FOR EACH ROW EXECUTE FUNCTION reject_season()"
+          : "CREATE TRIGGER reject_season BEFORE INSERT ON subject_aliases WHEN NEW.name='事务第一季' BEGIN SELECT RAISE(ABORT, 'season test failure'); END",
       );
       assert.equal(
         (await send('/api/v1/admin/import', fixture(651, '事务第二季', []))).status,
@@ -915,7 +928,7 @@ for (const kind of ['node', 'worker'] as const) {
   });
 }
 
-for (const kind of ['node', 'worker'] as const)
+for (const kind of ['node', 'worker', 'postgres'] as const)
   test(`${kind}: 数据库故障记录原因链和关联 ID，不泄露请求内容或凭证`, async () => {
     const bangumiSecret = 'server-error-test-bangumi-token';
     const target = await runtime(kind, false, {
@@ -925,7 +938,9 @@ for (const kind of ['node', 'worker'] as const)
     });
     try {
       await target.sql(
-        `CREATE TRIGGER reject_import BEFORE INSERT ON subjects BEGIN SELECT RAISE(ABORT, 'storage failure ${bangumiSecret}; params: private-sql-parameter'); END`,
+        kind === 'postgres'
+          ? `CREATE FUNCTION reject_import() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'storage failure ${bangumiSecret}; params: private-sql-parameter'; END $$; CREATE TRIGGER reject_import BEFORE INSERT ON subjects FOR EACH ROW EXECUTE FUNCTION reject_import()`
+          : `CREATE TRIGGER reject_import BEFORE INSERT ON subjects BEGIN SELECT RAISE(ABORT, 'storage failure ${bangumiSecret}; params: private-sql-parameter'); END`,
       );
       const response = await target.fetch('/api/v1/admin/import?private-query-value=1', {
         method: 'POST',
@@ -1052,7 +1067,7 @@ test('Worker 定时同步失败保留上游原因，并向平台报告失败', a
   }
 });
 
-for (const kind of ['node', 'worker'] as const)
+for (const kind of ['node', 'worker', 'postgres'] as const)
   test(`${kind}: Archive 多别名导入兼容 D1，保留手动别名并支持幂等重放`, async () => {
     const target = await runtime(kind, false);
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -1109,7 +1124,7 @@ for (const kind of ['node', 'worker'] as const)
     }
   });
 
-for (const kind of ['node', 'worker'] as const) {
+for (const kind of ['node', 'worker', 'postgres'] as const) {
   for (const enabled of [false, true])
     test(`${kind}: 真实 HTTP/存储契约，统计 ${enabled}`, async () => {
       const target = await runtime(kind, enabled);
@@ -1251,7 +1266,9 @@ for (const kind of ['node', 'worker'] as const) {
         assert.equal((await json('/api/v1/admin/stats/prune', 'POST', { days: 90 })).deleted, 1);
         // 统计写入失败仍返回正常评分，而且事务不留下半份 daily 记录。
         await target.sql(
-          "CREATE TRIGGER reject_usage BEFORE INSERT ON subject_usage BEGIN SELECT RAISE(ABORT, 'test failure'); END",
+          kind === 'postgres'
+            ? "CREATE FUNCTION reject_usage() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test failure'; END $$; CREATE TRIGGER reject_usage BEFORE INSERT ON subject_usage FOR EACH ROW EXECUTE FUNCTION reject_usage()"
+            : "CREATE TRIGGER reject_usage BEFORE INSERT ON subject_usage BEGIN SELECT RAISE(ABORT, 'test failure'); END",
         );
         assert.equal(
           (await batch([{ inputId: 'a', subjectId: 100 }])).results[0].status,
@@ -1276,7 +1293,13 @@ test('Node CLI: Archive 断点、备份恢复与流式解压', async () => {
   assert.equal(await readFile(extracted, 'utf8'), source);
   const run = (args: string[], database = join(dir, 'source.sqlite')) =>
     promisify(execFile)(process.execPath, ['dist/node/cli.js', ...args], {
-      env: { ...process.env, DATABASE_PATH: database, ADMIN_TOKEN: token, STATS_ENABLED: 'false' },
+      env: {
+        ...process.env,
+        DATABASE_DRIVER: 'sqlite',
+        DATABASE_PATH: database,
+        ADMIN_TOKEN: token,
+        STATS_ENABLED: 'false',
+      },
     });
   const args = [
     'sync-archive',
@@ -1302,57 +1325,63 @@ test('Node CLI: Archive 断点、备份恢复与流式解压', async () => {
   assert.equal(await readFile(backup2, 'utf8'), await readFile(backup, 'utf8'));
 });
 
-test('Node 打包入口能启动、自动迁移并返回 JSON', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'bangumi-entry-'));
-  const child = spawn(process.execPath, ['dist/node/node.js'], {
-    env: {
-      ...process.env,
-      HOST: '127.0.0.1',
-      PORT: '0',
-      DATABASE_PATH: join(dir, 'app.sqlite'),
-      STATS_ENABLED: 'false',
-      ADMIN_TOKEN: '',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const stopped = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-  let stderr = '';
-  child.stderr.on('data', (chunk) => {
-    stderr += String(chunk);
-  });
-  try {
-    const port = await new Promise<number>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Node 启动超时 ${stderr}`)), 10000);
-      let stdout = '';
-      child.stdout.on('data', (chunk) => {
-        stdout += String(chunk);
-        const line = stdout.split('\n').find((s) => s.includes('"listening"'));
-        if (line) {
+for (const databaseDriver of ['sqlite', 'postgres'] as const)
+  test(`Node 打包入口 (${databaseDriver}) 能启动、自动迁移并返回 JSON`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'bangumi-entry-'));
+    const pg = databaseDriver === 'postgres' ? await postgresTestDatabase(false) : undefined;
+    const child = spawn(process.execPath, ['dist/node/node.js'], {
+      env: {
+        ...process.env,
+        HOST: '127.0.0.1',
+        PORT: '0',
+        DATABASE_DRIVER: databaseDriver,
+        DATABASE_URL: pg?.url ?? '',
+        DATABASE_POOL_SIZE: '1',
+        DATABASE_PATH: join(dir, 'app.sqlite'),
+        STATS_ENABLED: 'false',
+        ADMIN_TOKEN: '',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stopped = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    let stderr = '';
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Node 启动超时 ${stderr}`)), 10000);
+        let stdout = '';
+        child.stdout.on('data', (chunk) => {
+          stdout += String(chunk);
+          const line = stdout.split('\n').find((s) => s.includes('"listening"'));
+          if (line) {
+            clearTimeout(timer);
+            resolve((JSON.parse(line) as { port: number }).port);
+          }
+        });
+        child.once('error', (error) => {
           clearTimeout(timer);
-          resolve((JSON.parse(line) as { port: number }).port);
-        }
+          reject(error);
+        });
+        child.once('exit', () => {
+          clearTimeout(timer);
+          reject(new Error(`Node 提前退出 ${stderr}`));
+        });
       });
-      child.once('error', (error) => {
-        clearTimeout(timer);
-        reject(error);
+      const response = await fetch(`http://127.0.0.1:${port}/health/ready`);
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        status: 'ok',
+        schemaVersion: 1,
+        statisticsEnabled: false,
       });
-      child.once('exit', () => {
-        clearTimeout(timer);
-        reject(new Error(`Node 提前退出 ${stderr}`));
-      });
-    });
-    const response = await fetch(`http://127.0.0.1:${port}/health/ready`);
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), {
-      status: 'ok',
-      schemaVersion: 1,
-      statisticsEnabled: false,
-    });
-  } finally {
-    child.kill('SIGTERM');
-    await stopped;
-  }
-});
+    } finally {
+      child.kill('SIGTERM');
+      await stopped;
+      await pg?.close();
+    }
+  });
 
 test('Archive 可跳过损坏行，记录错误并在断点续跑后保留 partial 状态', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'bangumi-invalid-'));
@@ -1382,6 +1411,7 @@ test('Archive 可跳过损坏行，记录错误并在断点续跑后保留 parti
       {
         env: {
           ...process.env,
+          DATABASE_DRIVER: 'sqlite',
           DATABASE_PATH: database,
           ADMIN_TOKEN: token,
           STATS_ENABLED: 'false',
@@ -1455,6 +1485,7 @@ test('Archive 跳过模式仍在数据库写入失败时停止，且不越过失
       {
         env: {
           ...process.env,
+          DATABASE_DRIVER: 'sqlite',
           DATABASE_PATH: database,
           ADMIN_TOKEN: token,
           STATS_ENABLED: 'false',
@@ -1474,7 +1505,7 @@ test('Archive 跳过模式仍在数据库写入失败时停止，且不越过失
   assert.equal(JSON.parse((await run()).stdout).imported, 1);
 });
 
-for (const kind of ['node', 'worker'] as const)
+for (const kind of ['node', 'worker', 'postgres'] as const)
   test(`${kind}: 远程单条同步使用服务端 Bangumi Secret，本地 CLI 只需管理令牌`, async () => {
     const requests: { url: string; headers: Headers }[] = [];
     let rejected = false;
@@ -1541,7 +1572,7 @@ for (const kind of ['node', 'worker'] as const)
     }
   });
 
-for (const kind of ['node', 'worker'] as const)
+for (const kind of ['node', 'worker', 'postgres'] as const)
   test(`${kind}: calendar 批量导入保留详情、排名与别名，支持 CLI 和定时触发`, async () => {
     const requests: { url: string; headers: Headers }[] = [];
     let phase: 'normal' | 'empty' | 'malformed' | 'storage' = 'normal';
@@ -1696,7 +1727,9 @@ for (const kind of ['node', 'worker'] as const)
       );
       phase = 'storage';
       await target.sql(
-        "CREATE TRIGGER reject_calendar BEFORE INSERT ON subjects WHEN NEW.id=999 BEGIN SELECT RAISE(ABORT, 'test'); END",
+        kind === 'postgres'
+          ? "CREATE FUNCTION reject_calendar() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id=999 THEN RAISE EXCEPTION 'test'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_calendar BEFORE INSERT ON subjects FOR EACH ROW EXECUTE FUNCTION reject_calendar()"
+          : "CREATE TRIGGER reject_calendar BEFORE INSERT ON subjects WHEN NEW.id=999 BEGIN SELECT RAISE(ABORT, 'test'); END",
       );
       assert.equal((await sync()).status, 503);
       assert.equal((await target.sql('SELECT * FROM subjects WHERE id=999')).length, 0);
@@ -1744,7 +1777,7 @@ test('Worker 日历定时开关关闭时不访问上游', async () => {
   }
 });
 
-for (const kind of ['node', 'worker'] as const)
+for (const kind of ['node', 'worker', 'postgres'] as const)
   test(`${kind}: platform 补全遵守批次预算，CLI 可连续处理剩余条目`, async () => {
     const urls: string[] = [];
     const target = await runtime(kind, false, {

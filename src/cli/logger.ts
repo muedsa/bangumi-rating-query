@@ -55,6 +55,7 @@ export function createCliLogger(options: {
           if (typeof value !== 'string') return value;
           let safe = value.replace(/Bearer\s+[^\s"'<>]+/giu, 'Bearer [REDACTED]');
           for (const secret of secrets) safe = safe.replaceAll(secret, '[REDACTED]');
+          safe = safe.replace(/\bpostgres(?:ql)?:\/\/[^\s"'<>]+/giu, '[URL_REDACTED]');
           return safe;
         },
       ),

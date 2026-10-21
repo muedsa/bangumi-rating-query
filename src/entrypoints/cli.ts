@@ -43,6 +43,7 @@ function makeLogger(level: LogVerbosity) {
       process.env.BANGUMI_ACCESS_TOKEN ?? '',
       process.env.ADMIN_TOKEN?.trim() ?? '',
       process.env.BANGUMI_ACCESS_TOKEN?.trim() ?? '',
+      process.env.DATABASE_URL ?? '',
     ],
   });
 }
@@ -118,8 +119,8 @@ async function main() {
         requestRetries,
         log: logger.log,
       })
-    : localTarget(
-        process.env.DATABASE_PATH ?? './data/bangumi.sqlite',
+    : await localTarget(
+        process.env,
         command === 'sync-calendar' ? createBangumiSource(config) : undefined,
         config.CALENDAR_PLATFORM_BATCH_SIZE,
       );
@@ -295,7 +296,7 @@ async function main() {
         throw new Error(`未知命令：${command}`);
     }
   } finally {
-    target.close();
+    await target.close();
   }
 }
 main()

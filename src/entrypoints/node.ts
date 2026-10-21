@@ -1,7 +1,7 @@
 import { serve } from '@hono/node-server';
 import { existsSync } from 'node:fs';
 import { loadEnvFile } from 'node:process';
-import { SqliteDriver } from '../adapters/storage/sqlite.ts';
+import { openStorage } from '../adapters/storage/node.ts';
 import { SqlRepository } from '../adapters/storage/repository.ts';
 import { readConfig } from '../config.ts';
 import { createApp } from '../http/app.ts';
@@ -14,8 +14,13 @@ if (existsSync('.env')) loadEnvFile('.env');
 const config = readConfig(process.env);
 const port = Number(process.env.PORT ?? 3000);
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('PORT 无效');
-const driver = new SqliteDriver(process.env.DATABASE_PATH ?? './data/bangumi.sqlite');
-driver.migrate();
+const logError = createServerErrorLogger({
+  secrets: [config.ADMIN_TOKEN, config.BANGUMI_ACCESS_TOKEN, process.env.DATABASE_URL ?? ''],
+});
+const driver = await openStorage(process.env).catch((error) => {
+  logError('storage_initialization_failed', error);
+  process.exit(1);
+});
 const repo = new SqlRepository(driver);
 const source = createBangumiSource(config);
 const app = createApp(repo, config, { subjectSource: source, calendarSource: source });
@@ -23,7 +28,7 @@ const stopCalendar = config.CALENDAR_SYNC_ENABLED
   ? startCalendarSchedule(
       new CalendarSyncService(repo, source, config.CALENDAR_PLATFORM_BATCH_SIZE),
       config.CALENDAR_SYNC_HOUR_UTC,
-      createServerErrorLogger({ secrets: [config.ADMIN_TOKEN, config.BANGUMI_ACCESS_TOKEN] }),
+      logError,
     )
   : () => {};
 const server = serve(
@@ -41,8 +46,13 @@ const server = serve(
 function shutdown() {
   stopCalendar();
   server.close(() => {
-    driver.close();
-    process.exit(0);
+    Promise.resolve(driver.close()).then(
+      () => process.exit(0),
+      (error) => {
+        logError('storage_shutdown_failed', error);
+        process.exit(1);
+      },
+    );
   });
   setTimeout(() => process.exit(1), 10000).unref();
 }

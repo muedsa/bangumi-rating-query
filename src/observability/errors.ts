@@ -48,7 +48,7 @@ export function createServerErrorLogger(
     text = text
       .replace(/\bBearer\s+[^\s"'<>]+/giu, 'Bearer [REDACTED]')
       .replace(
-        /\b(?:https?|file):\/\/[^\s)<>"']+/giu,
+        /\b(?:https?|file|postgres(?:ql)?):\/\/[^\s)<>"']+/giu,
         (url) => '[URL_REDACTED]' + (url.match(/:\d+:\d+$/u)?.[0] ?? ''),
       )
       .replace(/\b(?:params|parameters|bindings|payload|body)\s*[:=][\s\S]*/giu, '[DATA_REDACTED]')
