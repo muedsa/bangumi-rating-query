@@ -698,6 +698,223 @@ async function runtime(
   };
 }
 
+for (const kind of ['node', 'worker'] as const) {
+  test(`${kind}: 导入与手动别名互补季数，补全第一季并支持反向导入和幂等刷新`, async () => {
+    const target = await runtime(kind, false);
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const send = async (path: string, body: unknown, method = 'POST') => {
+      const response = await target.fetch(path, {
+        method,
+        headers: auth,
+        body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      return (await response.json()) as any;
+    };
+    const aliases = async (id: number) =>
+      await target.sql(`SELECT * FROM subject_aliases WHERE subject_id=${id} ORDER BY id`);
+    try {
+      await send('/api/v1/admin/import', fixture(501, '星海', []));
+      await send('/api/v1/admin/import', fixture(502, '星海第2季', []));
+      const result = await send('/api/v1/ratings/batch', {
+        items: ['星海第一季', '星海第1季', '星海第二季', '星海第2季'].map((name, i) => ({
+          inputId: String(i),
+          names: [name],
+        })),
+      });
+      assert.deepEqual(
+        result.results.map((r: any) => [r.status, r.subject.id]),
+        [
+          ['matched', 501],
+          ['matched', 501],
+          ['matched', 502],
+          ['matched', 502],
+        ],
+      );
+      const before = await aliases(502);
+      await send('/api/v1/admin/import', fixture(502, '星海第2季', []));
+      assert.deepEqual(await aliases(502), before);
+
+      const added = await send('/api/v1/admin/subjects/502/aliases', { name: '别称第十二季' });
+      const repeated = await send('/api/v1/admin/subjects/502/aliases', { name: '别称第十二季' });
+      assert.equal(added.alias.id, repeated.alias.id);
+      assert((await aliases(502)).some((a) => a.name === '别称第12季' && a.source === 'manual'));
+      await send('/api/v1/admin/subjects/501/aliases', { name: '人工标题' });
+      await send('/api/v1/admin/subjects/502/aliases', { name: '人工标题第二季' });
+      assert((await aliases(501)).some((a) => a.name === '人工标题第1季' && a.source === 'manual'));
+      await send(`/api/v1/admin/aliases/${added.alias.id}`, { name: '别称第3季' }, 'PATCH');
+      assert((await aliases(502)).some((a) => a.name === '别称第三季' && a.source === 'manual'));
+      const newer = fixture(501, '星海', []);
+      newer.subject.metadataAt++;
+      await send('/api/v1/admin/import', newer);
+      const refreshed = await aliases(501);
+      for (const name of ['星海第一季', '星海第1季', '人工标题第一季', '人工标题第1季'])
+        assert(
+          refreshed.some((a) => a.name === name),
+          name,
+        );
+      await send('/api/v1/admin/import', fixture(504, '后导 第二季', []));
+      await send('/api/v1/admin/import', fixture(503, '后导', []));
+      assert((await aliases(503)).some((a) => a.name === '后导 第1季'));
+      assert((await aliases(503)).some((a) => a.name === '后导 第一季'));
+      // 旧库只有一种写法时，重复添加会补缺失项而不改变已有别名 ID。
+      await target.sql("DELETE FROM subject_aliases WHERE subject_id=502 AND name='别称第三季'");
+      await send('/api/v1/admin/subjects/502/aliases', { name: '别称第3季' });
+      assert((await aliases(502)).some((a) => a.name === '别称第三季'));
+    } finally {
+      await target.close();
+    }
+  });
+
+  test(`${kind}: 第一季优先明确季名，歧义和第二季自身不自动归属，转换后的冲突可见`, async () => {
+    const target = await runtime(kind, false);
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const add = async (id: number, name: string, aliases: string[] = []) => {
+      const response = await target.fetch('/api/v1/admin/import', {
+        method: 'POST',
+        headers: auth,
+        body: JSON.stringify(fixture(id, name, aliases)),
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+    };
+    const names = async (id: number) =>
+      (await target.sql(`SELECT name FROM subject_aliases WHERE subject_id=${id}`)).map(
+        (a) => a.name,
+      );
+    try {
+      await add(510, '明确第一季');
+      await target.sql("DELETE FROM subject_aliases WHERE subject_id=510 AND name='明确第1季'");
+      await add(511, '明确');
+      await add(512, '明确第二季');
+      assert(!(await names(511)).includes('明确第一季'));
+      assert((await names(510)).includes('明确第1季'));
+      await add(520, '撞名');
+      await add(521, '撞名');
+      await add(522, '撞名第二季');
+      assert(!(await names(520)).includes('撞名第一季'));
+      assert(!(await names(521)).includes('撞名第1季'));
+      await add(530, '冲突第一季');
+      await add(531, '冲突第1季');
+      await add(532, '冲突');
+      await add(533, '冲突第二季');
+      assert(!(await names(532)).includes('冲突第一季'));
+      await add(540, '自指第二季', ['自指']);
+      assert(!(await names(540)).includes('自指第一季'));
+      await add(541, '其他');
+      // 旧别名仅中文写法；新手动别名的数字写法也必须报告冲突。
+      await target.sql("DELETE FROM subject_aliases WHERE subject_id=540 AND name='自指第2季'");
+      const response = await target.fetch('/api/v1/admin/subjects/541/aliases', {
+        method: 'POST',
+        headers: auth,
+        body: JSON.stringify({ name: '自指第2季' }),
+      });
+      assert.equal(response.status, 200);
+      assert.deepEqual(((await response.json()) as any).conflictingSubjectIds, [540]);
+      assert((await names(541)).includes('自指第二季'));
+    } finally {
+      await target.close();
+    }
+  });
+
+  test(`${kind}: 季数扩展遵守上限，原别名与第一季补充遇到故障全部回滚`, async () => {
+    const target = await runtime(kind, false);
+    const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const send = (path: string, body: unknown) =>
+      target.fetch(path, { method: 'POST', headers: auth, body: JSON.stringify(body) });
+    try {
+      assert.equal((await send('/api/v1/admin/import', fixture(600, '满员', []))).status, 200);
+      await target.sql(`WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<247)
+        INSERT INTO subject_aliases SELECT 'limit-'||n,600,'已有'||n,'已有'||n,'manual',1,1 FROM nums`);
+      const before = await target.sql(
+        'SELECT * FROM subject_aliases WHERE subject_id=600 ORDER BY id',
+      );
+      const manual = await send('/api/v1/admin/subjects/600/aliases', { name: '新作第2季' });
+      assert.equal(manual.status, 400);
+      assert.equal(((await manual.json()) as any).error.code, 'ALIAS_LIMIT');
+      assert.deepEqual(
+        await target.sql('SELECT * FROM subject_aliases WHERE subject_id=600 ORDER BY id'),
+        before,
+      );
+      const tooMany = await send(
+        '/api/v1/admin/import',
+        fixture(
+          601,
+          '扩展超限',
+          Array.from({ length: 130 }, (_, i) => `作品${i}第2季`),
+        ),
+      );
+      assert.equal(tooMany.status, 400);
+      assert.equal((await target.sql('SELECT * FROM subjects WHERE id=601')).length, 0);
+      // 第一季没有容纳两个别名的空间时，第二季导入也不会部分提交。
+      assert.equal(
+        (await send('/api/v1/admin/import', fixture(602, '满员第二季', []))).status,
+        400,
+      );
+      assert.equal((await target.sql('SELECT * FROM subjects WHERE id=602')).length, 0);
+      const tooLong = await send('/api/v1/admin/subjects/600/aliases', {
+        name: '长'.repeat(294) + '第9999季',
+      });
+      assert.equal(tooLong.status, 400);
+      assert.equal(((await tooLong.json()) as any).error.code, 'ALIAS_TOO_LONG');
+      assert.equal((await send('/api/v1/admin/import', fixture(650, '事务', []))).status, 200);
+      await target.sql(
+        "CREATE TRIGGER reject_season BEFORE INSERT ON subject_aliases WHEN NEW.name='事务第一季' BEGIN SELECT RAISE(ABORT, 'season test failure'); END",
+      );
+      assert.equal(
+        (await send('/api/v1/admin/import', fixture(651, '事务第二季', []))).status,
+        503,
+      );
+      assert.equal((await target.sql('SELECT * FROM subjects WHERE id=651')).length, 0);
+      assert.equal(
+        (
+          await target.sql(
+            "SELECT * FROM subject_aliases WHERE name IN ('事务第一季','事务第1季','事务第2季','事务第二季')",
+          )
+        ).length,
+        0,
+      );
+    } finally {
+      await target.close();
+    }
+  });
+
+  test(`${kind}: calendar 同批次季数补全不依赖条目顺序，重复同步不重复插入`, async () => {
+    const items = [
+      { id: 702, type: 2, name: '日历 第二季', name_cn: '日历 第2季' },
+      { id: 701, type: 2, name: '日历' },
+    ];
+    const target = await runtime(kind, false, {
+      userAgent: 'test/seasons',
+      accessToken: '',
+      fetcher: (async (url) =>
+        String(url).endsWith('/calendar')
+          ? Response.json([{ items }])
+          : Response.json({
+              id: Number(String(url).split('/').pop()),
+              type: 2,
+              platform: 'TV',
+            })) as typeof fetch,
+    });
+    try {
+      const sync = () =>
+        target.fetch('/api/v1/admin/calendar/sync', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      const response = await sync();
+      assert.equal(response.status, 200, await response.clone().text());
+      const before = await target.sql('SELECT * FROM subject_aliases ORDER BY id');
+      for (const name of ['日历 第一季', '日历 第1季'])
+        assert(before.some((a) => a.subject_id === 701 && a.name === name));
+      assert.equal(before.filter((a) => a.subject_id === 702).length, 2);
+      assert.equal((await sync()).status, 200);
+      assert.deepEqual(await target.sql('SELECT * FROM subject_aliases ORDER BY id'), before);
+    } finally {
+      await target.close();
+    }
+  });
+}
+
 for (const kind of ['node', 'worker'] as const)
   test(`${kind}: 数据库故障记录原因链和关联 ID，不泄露请求内容或凭证`, async () => {
     const bangumiSecret = 'server-error-test-bangumi-token';

@@ -12,6 +12,7 @@ import {
 } from '../../core/models.ts';
 import { normalizeName } from '../../core/matching.ts';
 import { chunks, compile, list, sql, type Row, type SqlDriver } from './sql.ts';
+import { aliasInsertStatement } from './season-aliases.ts';
 
 const subjectColumns = sql`id, name, name_cn AS nameCn, air_date AS airDate, platform,
   metadata_at AS metadataAt, cached_at AS cachedAt, pinned`;
@@ -52,10 +53,9 @@ export class SqlRepository implements ApplicationRepository {
     const items = [...new Map(snapshot.items.map((item) => [item.id, item])).values()];
     const aliases = items.flatMap((item) =>
       [...new Set([item.name, item.nameCn].filter(Boolean))].map((name) => ({
-        id: crypto.randomUUID(),
         subjectId: item.id,
         name,
-        normalizedName: normalizeName(name),
+        source: 'bangumi' as const,
       })),
     );
     const statements: SQL[] = [];
@@ -66,13 +66,8 @@ export class SqlRepository implements ApplicationRepository {
         json_extract(value,'$.airDate'),'',0,${now},0 FROM json_each(${JSON.stringify(items)}) WHERE true
       ON CONFLICT(id) DO NOTHING`);
     // 日历只有名称；只补充名称，绝不删除已有官方/手动别名。
-    if (aliases.length)
-      statements.push(sql`INSERT INTO subject_aliases(id,subject_id,name,normalized_name,source,created_at,updated_at)
-      SELECT json_extract(a.value,'$.id'),json_extract(a.value,'$.subjectId'),json_extract(a.value,'$.name'),
-        json_extract(a.value,'$.normalizedName'),'bangumi',${now},${now}
-      FROM json_each(${JSON.stringify(aliases)}) a
-      WHERE (SELECT COUNT(*) FROM subject_aliases old WHERE old.subject_id=json_extract(a.value,'$.subjectId')) <= 248
-      ON CONFLICT(subject_id,name,source) DO NOTHING`);
+    const aliasInsert = await aliasInsertStatement(this, aliases, now, { skipFullSubjects: true });
+    if (aliasInsert) statements.push(aliasInsert);
     const ratings = items.filter((item) => item.rating !== null);
     if (ratings.length)
       statements.push(sql`INSERT INTO ratings_current(subject_id,score,votes,rank,source,data_as_of,fetched_at)
@@ -132,23 +127,41 @@ export class SqlRepository implements ApplicationRepository {
     return rows;
   }
   async addManualAlias(subjectId: number, name: string, now: number) {
-    const current = await this.listAliases(subjectId);
-    if (current.length >= 250 && !current.some((a) => a.name === name && a.source === 'manual'))
-      throw new AppError(400, 'ALIAS_LIMIT', '单条目别名数量已达上限');
-    const rows = await this.query<Alias>(sql`INSERT INTO subject_aliases
-      (id, subject_id, name, normalized_name, source, created_at, updated_at)
-      VALUES (${crypto.randomUUID()}, ${subjectId}, ${name}, ${normalizeName(name)}, 'manual', ${now}, ${now})
-      ON CONFLICT(subject_id, name, source) DO UPDATE SET name = excluded.name
-      RETURNING ${aliasColumns}`);
+    const statement = await aliasInsertStatement(
+      this,
+      [{ subjectId, name, source: 'manual' }],
+      now,
+    );
+    if (statement) await this.driver.batch([compile(statement)]);
+    const rows = await this.query<Alias>(sql`SELECT ${aliasColumns} FROM subject_aliases
+      WHERE subject_id=${subjectId} AND name=${name} AND source='manual'`);
     return rows[0]!;
   }
   async updateManualAlias(id: string, name: string, now: number) {
+    const original = (
+      await this.query<Alias>(
+        sql`SELECT ${aliasColumns} FROM subject_aliases WHERE id=${id} AND source='manual'`,
+      )
+    )[0];
+    if (!original) return null;
+    const aliasInsert = await aliasInsertStatement(
+      this,
+      [{ subjectId: original.subjectId, name, source: 'manual' }],
+      now,
+      {
+        removeAliasId: id,
+        guard: sql`EXISTS (SELECT 1 FROM subject_aliases WHERE id=${id} AND source='manual')`,
+      },
+    );
     // 重名更新交给唯一约束处理，避免静默合并不同 aliasId。
     try {
-      const rows = await this
-        .query<Alias>(sql`UPDATE subject_aliases SET name = ${name}, normalized_name = ${normalizeName(name)},
-        updated_at = ${now} WHERE id = ${id} AND source = 'manual' RETURNING ${aliasColumns}`);
-      return rows[0] ?? null;
+      const statements = [
+        sql`UPDATE subject_aliases SET name = ${name}, normalized_name = ${normalizeName(name)},
+        updated_at = ${now} WHERE id = ${id} AND source = 'manual' RETURNING ${aliasColumns}`,
+      ];
+      if (aliasInsert) statements.push(aliasInsert);
+      const rows = await this.driver.batch(statements.map(compile));
+      return (rows[0]?.[0] as Alias | undefined) ?? null;
     } catch (error) {
       if (String(error).includes('UNIQUE constraint'))
         throw new AppError(409, 'ALIAS_EXISTS', '该条目已有相同手动别名');
@@ -167,11 +180,6 @@ export class SqlRepository implements ApplicationRepository {
     const existing = (await this.findSubjects([s.id]))[0];
     const statements: SQL[] = [];
     if (!existing || s.metadataAt > existing.metadataAt) {
-      const manualCount = existing
-        ? (await this.listAliases(s.id)).filter((a) => a.source === 'manual').length
-        : 0;
-      if (names.length + manualCount > 250)
-        throw new AppError(400, 'ALIAS_LIMIT', '合并后别名超过 250 条，请先整理手动别名');
       statements.push(sql`INSERT INTO subjects (id, name, name_cn, air_date, platform, metadata_at, cached_at, pinned)
         VALUES (${s.id}, ${s.name}, ${s.nameCn}, ${s.airDate}, ${s.platform}, ${s.metadataAt}, ${s.cachedAt}, ${Number(s.pinned)})
         ON CONFLICT(id) DO UPDATE SET name=excluded.name, name_cn=excluded.name_cn, air_date=excluded.air_date,
@@ -179,17 +187,16 @@ export class SqlRepository implements ApplicationRepository {
         WHERE excluded.metadata_at > subjects.metadata_at`);
       statements.push(sql`DELETE FROM subject_aliases WHERE subject_id=${s.id} AND source='bangumi'
         AND EXISTS (SELECT 1 FROM subjects WHERE id=${s.id} AND metadata_at=${s.metadataAt})`);
-      // D1 对复合 SELECT 的项数限制更低；JSON 参数既避免 UNION ALL，也避免绑定参数随别名数增长。
-      const aliases = names.map((name) => ({
-        id: crypto.randomUUID(),
-        name,
-        normalizedName: normalizeName(name),
-      }));
-      statements.push(sql`INSERT INTO subject_aliases (id, subject_id, name, normalized_name, source, created_at, updated_at)
-        SELECT json_extract(value,'$.id'), ${s.id}, json_extract(value,'$.name'),
-          json_extract(value,'$.normalizedName'), 'bangumi', ${s.cachedAt}, ${s.cachedAt}
-        FROM json_each(${JSON.stringify(aliases)})
-        WHERE EXISTS (SELECT 1 FROM subjects WHERE id=${s.id} AND metadata_at=${s.metadataAt})`);
+      const aliasInsert = await aliasInsertStatement(
+        this,
+        names.map((name) => ({ subjectId: s.id, name, source: 'bangumi' })),
+        s.cachedAt,
+        {
+          replaceBangumiIds: [s.id],
+          guard: sql`EXISTS (SELECT 1 FROM subjects WHERE id=${s.id} AND metadata_at=${s.metadataAt})`,
+        },
+      );
+      if (aliasInsert) statements.push(aliasInsert);
     }
     const r = record.rating;
     if (r) {

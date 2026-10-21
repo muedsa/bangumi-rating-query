@@ -118,11 +118,15 @@ export function getOpenApi(maxBatchSize: number) {
         }),
       },
       '/api/v1/admin/subjects/{id}/aliases': {
-        post: operation('幂等添加手动别名', aliasResult, {
-          admin: true,
-          parameters: [idParam],
-          body: aliasBody,
-        }),
+        post: operation(
+          '幂等添加手动别名，互补末尾季数的中阿数字写法并补全唯一匹配的第一季别名',
+          aliasResult,
+          {
+            admin: true,
+            parameters: [idParam],
+            body: aliasBody,
+          },
+        ),
       },
       '/api/v1/admin/subjects/{id}/sync': {
         post: operation(
@@ -139,7 +143,7 @@ export function getOpenApi(maxBatchSize: number) {
         ),
       },
       '/api/v1/admin/aliases/{aliasId}': {
-        patch: operation('修改手动别名', aliasResult, {
+        patch: operation('修改手动别名，并应用季数别名补全规则', aliasResult, {
           admin: true,
           parameters: [aliasParam],
           body: aliasBody,
@@ -151,7 +155,7 @@ export function getOpenApi(maxBatchSize: number) {
       },
       '/api/v1/admin/import': {
         post: operation(
-          '导入一条标准化动画数据；不覆盖手动别名',
+          '导入一条标准化动画数据，自动补全季数别名；不覆盖手动别名',
           z.object({ imported: z.number().int() }),
           { admin: true, body: importSchema },
         ),

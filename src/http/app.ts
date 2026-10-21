@@ -6,6 +6,7 @@ import { z, ZodError } from 'zod';
 import { AppError, batchSchema, importSchema, nameSchema, positiveId } from '../core/models.ts';
 import { QueryService } from '../core/query-service.ts';
 import { normalizeName } from '../core/matching.ts';
+import { seasonAliasNames } from '../core/season-aliases.ts';
 import type { ApplicationRepository, CalendarSource, SubjectSource } from '../core/ports.ts';
 import { SubjectSyncService } from '../core/sync-service.ts';
 import { CalendarSyncService } from '../core/calendar-sync-service.ts';
@@ -139,7 +140,7 @@ export function createApp(
     const alias = await repo.addManualAlias(id, name, Date.now());
     const conflicts = [
       ...new Set(
-        (await repo.findAliases([normalizeName(name)]))
+        (await repo.findAliases(seasonAliasNames(name).map(normalizeName)))
           .filter((a) => a.subjectId !== id)
           .map((a) => a.subjectId),
       ),
@@ -154,7 +155,7 @@ export function createApp(
       alias,
       conflictingSubjectIds: [
         ...new Set(
-          (await repo.findAliases([normalizeName(name)]))
+          (await repo.findAliases(seasonAliasNames(name).map(normalizeName)))
             .filter((a) => a.subjectId !== alias.subjectId)
             .map((a) => a.subjectId),
         ),
