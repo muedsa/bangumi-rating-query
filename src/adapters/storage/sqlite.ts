@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Row, SqlDriver, Statement } from './sql.ts';
+import { MIGRATIONS, readSchemaVersion } from './schema.ts';
 
 export class SqliteDriver implements SqlDriver {
   readonly db: DatabaseSync;
@@ -28,18 +29,18 @@ export class SqliteDriver implements SqlDriver {
     }
   }
   migrate(directory = 'migrations') {
-    const exists = this.db
-      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'")
-      .get();
-    if (exists) {
-      if (!this.db.prepare('SELECT 1 FROM schema_version WHERE version=1').get())
-        throw new Error('不支持的数据库版本');
-      return;
-    }
-    const migration = readFileSync(resolve(directory, '0001_initial.sql'), 'utf8');
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.db.exec(migration);
+      const exists = this.db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'")
+        .get();
+      const version = exists
+        ? readSchemaVersion(
+            this.db.prepare('SELECT version FROM schema_version').all() as { version: number }[],
+          )
+        : 0;
+      for (const file of MIGRATIONS.slice(version))
+        this.db.exec(readFileSync(resolve(directory, file), 'utf8'));
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');

@@ -14,6 +14,7 @@ import { backupSchema } from '../core/backup.ts';
 import type { Config } from '../config.ts';
 import { getOpenApi } from './openapi.ts';
 import { createServerErrorLogger, requestErrorContext } from '../observability/errors.ts';
+import { SCHEMA_VERSION } from '../adapters/storage/schema.ts';
 
 export function createApp(
   repo: ApplicationRepository,
@@ -43,6 +44,7 @@ export function createApp(
   );
   const service = new QueryService(repo, {
     statsEnabled: config.STATS_ENABLED,
+    aliasMissStatsEnabled: config.ALIAS_MISS_STATS_ENABLED,
     ratingTtlHours: config.RATING_TTL_HOURS,
   });
   app.use('*', async (c, next) => {
@@ -91,15 +93,21 @@ export function createApp(
   app.get('/openapi.json', (c) => c.json(getOpenApi(config.MAX_BATCH_SIZE)));
   app.get('/health/ready', async (c) => {
     if (!(await repo.ready())) throw new AppError(503, 'NOT_READY', '数据库迁移未完成');
-    return c.json({ status: 'ok', schemaVersion: 1, statisticsEnabled: config.STATS_ENABLED });
+    return c.json({
+      status: 'ok',
+      schemaVersion: SCHEMA_VERSION,
+      statisticsEnabled: config.STATS_ENABLED,
+    });
   });
   app.post('/api/v1/ratings/batch', async (c) => {
     const { items } = batchSchema.parse(await c.req.json());
     if (items.length > config.MAX_BATCH_SIZE)
       throw new AppError(400, 'BATCH_TOO_LARGE', `每批最多 ${config.MAX_BATCH_SIZE} 条`);
     return c.json(
-      await service.batch(items, (error) =>
-        logError('usage_write_failed', error, errorContext(c, 200)),
+      await service.batch(
+        items,
+        (error) => logError('usage_write_failed', error, errorContext(c, 200)),
+        (error) => logError('alias_miss_write_failed', error, errorContext(c, 200)),
       ),
     );
   });
@@ -188,6 +196,9 @@ export function createApp(
   });
   app.get('/api/v1/admin/stats', async (c) =>
     c.json({ enabled: config.STATS_ENABLED, subjects: await repo.stats() }),
+  );
+  app.get('/api/v1/admin/stats/alias-misses', async (c) =>
+    c.json({ enabled: config.ALIAS_MISS_STATS_ENABLED, aliases: await repo.aliasMissStats() }),
   );
   app.post('/api/v1/admin/stats/prune', async (c) => {
     const { days } = z

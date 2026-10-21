@@ -6,6 +6,7 @@ const bool = z
   .transform((s) => s === 'true');
 const configSchema = z.object({
   STATS_ENABLED: bool,
+  ALIAS_MISS_STATS_ENABLED: bool,
   MAX_BATCH_SIZE: z.coerce.number().int().min(1).max(20).default(20),
   RATING_TTL_HOURS: z.coerce.number().positive().max(8760).default(24),
   ADMIN_TOKEN: z

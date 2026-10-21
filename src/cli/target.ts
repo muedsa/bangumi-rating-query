@@ -22,6 +22,7 @@ export async function localTarget(
     exportPage: (after: number) => repo.exportPage(after),
     restore: (record: BackupRecord) => repo.restoreRecord(record),
     stats: () => repo.stats(),
+    aliasMisses: () => repo.aliasMissStats(),
     prune: (days: number) => repo.pruneDaily(days),
     retention: (days: number, enabled: boolean) => repo.retentionPreview(days, enabled),
     alias: (id: number, name: string) => repo.addManualAlias(id, name, Date.now()),

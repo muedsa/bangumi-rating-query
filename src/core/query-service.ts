@@ -7,13 +7,19 @@ export class QueryService {
     private repo: AnimeRepository,
     private options: {
       statsEnabled: boolean;
+      aliasMissStatsEnabled?: boolean;
       ratingTtlHours: number;
       now?: () => number;
       onStatsError?: (error: unknown) => void;
+      onAliasMissStatsError?: (error: unknown) => void;
     },
   ) {}
 
-  async batch(items: QueryItem[], onStatsError = this.options.onStatsError) {
+  async batch(
+    items: QueryItem[],
+    onStatsError = this.options.onStatsError,
+    onAliasMissStatsError = this.options.onAliasMissStatsError,
+  ) {
     const now = (this.options.now ?? Date.now)();
     const keys = [...new Set(items.flatMap((i) => i.names ?? []).map(normalizeName))];
     const aliases = await this.repo.findAliases(keys);
@@ -30,6 +36,17 @@ export class QueryService {
       (await this.repo.getRatings(subjects.map((s) => s.id))).map((r) => [r.subjectId, r]),
     );
     const hits = new Set<number>();
+    const misses = new Map<string, string>();
+    if (this.options.aliasMissStatsEnabled) {
+      const known = new Set(aliases.map((alias) => alias.normalizedName));
+      for (const item of items) {
+        if (item.subjectId) continue;
+        for (const name of item.names ?? []) {
+          const key = normalizeName(name);
+          if (!extractSubjectId(name) && !known.has(key) && !misses.has(key)) misses.set(key, name);
+        }
+      }
+    }
     const results = items.map((item) => {
       const groups = item.subjectId
         ? [new Set([item.subjectId])]
@@ -99,6 +116,13 @@ export class QueryService {
         await this.repo.recordHits([...hits], now);
       } catch (error) {
         onStatsError?.(error);
+      }
+    }
+    if (this.options.aliasMissStatsEnabled && misses.size) {
+      try {
+        await this.repo.recordAliasMisses([...misses.values()], now);
+      } catch (error) {
+        onAliasMissStatsError?.(error);
       }
     }
     return { results };

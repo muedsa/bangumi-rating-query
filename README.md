@@ -18,6 +18,7 @@
 - 手动别名增删改、幂等添加、同名冲突提示；上游同步不覆盖手动别名。
 - 写入时互补 `第2季` / `第二季` 等季数别名，并为唯一匹配的第一季条目补全季数名称。
 - **访问统计默认关闭**，开启后统计条目最近访问、累计命中、每日命中和近 7/30 天热度。
+- **未命中别名统计默认关闭**，独立记录未知查询名称与累计未命中次数，供后续补充别名。
 - Archive 下载、SHA-256 校验、流式解压、分批断点导入，以及单条目 API 更新。
 - Bangumi calendar 全周日历批量导入，支持管理接口、CLI、Worker Cron 和 Node 每日调度。
 - 版本化 JSONL 备份恢复，支持 D1、SQLite、PostgreSQL 之间迁移，保留手动别名与统计。
@@ -468,7 +469,7 @@ Node 调度按 UTC 整点每天执行，重启后等待下一个计划时间；�
 - 批量查询及条目详情计数；别名列表、歧义候选、未命中、同步和管理检查不计数。
 - 记录最近访问时间、累计次数、每日次数；每日以 UTC 划分，7/30 天窗口包含当天。
 - 每次统计对总计和每日记录使用同一事务。失败时不阻断查询，并记录 `usage_write_failed` 事件。
-- 不记录查询原文、IP、User-Agent，也不声称近似统计可以直接支撑可靠自动删除。
+- 访问统计本身不记录查询原文、IP、User-Agent，也不声称近似统计可以直接支撑可靠自动删除；另行开启未命中别名统计后，会保存未知查询名称。
 
 ```sh
 bun run stats:summary
@@ -479,6 +480,34 @@ bun run cli stats-prune --days 90
 `stats-prune` 每次最多删除 1000 条历史每日记录，返回 `hasMore`；可定期继续执行。它保留累计次数和最近访问时间，保留天数至少为 30 天。
 
 冷数据预览默认筛选已入库超过 90 天、90 天无访问且未固定保留的条目，最多返回 100 条。统计关闭时不给出冷数据候选。**首版始终返回 `actionable=false`，没有条目删除接口，也不自动删除人工别名。** 启停统计或写入失败都会产生观察空窗，必须结合统计完整性判断。
+
+### 未命中别名统计
+
+设置 `ALIAS_MISS_STATS_ENABLED=true` 后，`POST /api/v1/ratings/batch` 会记录找不到别名映射的名称。此开关默认 `false`，独立于 `STATS_ENABLED`；关闭时查询不会读取或写入未命中统计表，已有记录保留。
+
+- 按与查询相同的 NFKC、大小写和空白归一化规则汇总，同一 HTTP 请求中同一归一化名称只增加一次，不同请求（包括重试）分别计数。
+- 多名称查询中，即使其他名称命中，也会记录其中未知的名称。显式 `subjectId` 查询附带的名称不参与此统计，Bangumi 条目链接也不统计；纯数字作品名仍按名称统计。
+- 已知别名因为年份、平台筛选或歧义而没有唯一结果时不算未知；已匹配条目缺少评分也不算未知。
+- 保存归一化名称、最近一次未命中的名称写法、累计次数、首次及最后未命中时间（Unix 毫秒），不保存 IP、User-Agent 或 inputId。
+- 写入失败时保留评分查询结果，并记录 `alias_miss_write_failed`，日志不附带查询原文。补充别名后，后续命中不再累计；历史统计仍保留。
+
+管理员可查看次数最多的 100 条，依次按未命中次数、最后未命中时间降序排列：
+
+```text
+GET /api/v1/admin/stats/alias-misses
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+响应为 `{ "enabled": true, "aliases": [{ "name": "未知名称", "normalizedName": "未知名称", "missCount": 3, "firstMissedAt": 1792540800000, "lastMissedAt": 1792540860000 }] }`。关闭开关后仍可查看已有统计。CLI 同样支持本地数据库和远程服务：
+
+```sh
+bun run cli alias-misses
+bun run cli alias-misses --api-url https://your-worker.example.com
+```
+
+Node/CLI 使用 `.env`，修改后重启；Docker Compose 透传同名变量。Worker 在 `wrangler.jsonc` 的 `vars.ALIAS_MISS_STATS_ENABLED` 中配置，重新部署生效。
+
+本次增加 schema 第 2 版：Node/CLI 启动时自动按顺序迁移 SQLite/PostgreSQL，旧条目、别名和统计保留。Worker 部署前先执行 `bunx wrangler d1 migrations apply DB --remote`（本地使用 `--local`），再部署新版本。未命中统计没有对应条目，属于环境统计数据，不包含在现有按条目导出的业务备份中；`stats-prune` 仍只清理每日访问统计。
 
 ## 备份与迁移
 
@@ -517,6 +546,7 @@ bun run cli import --file backup.jsonl --api-url https://your-worker.example.com
 | `DATABASE_POOL_SIZE`           | `10`                                    | PostgreSQL 每进程最大连接数，范围 1～100                                      |
 | `ADMIN_TOKEN`                  | 空                                      | 空值关闭管理 API；非空至少 32 字符                                            |
 | `STATS_ENABLED`                | `false`                                 | 仅接受 `true` / `false`                                                       |
+| `ALIAS_MISS_STATS_ENABLED`     | `false`                                 | 独立记录未知查询名称及累计未命中次数，仅接受 `true` / `false`                 |
 | `MAX_BATCH_SIZE`               | `20`                                    | 允许 1～20                                                                    |
 | `RATING_TTL_HOURS`             | `24`                                    | 评分过期标记阈值，不代表自动刷新间隔                                          |
 | `BANGUMI_USER_AGENT`           | 空                                      | 单条目同步所需的应用标识，Worker 配置在 `vars`，Node/本地 CLI 使用环境变量    |

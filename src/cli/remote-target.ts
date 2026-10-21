@@ -1,6 +1,7 @@
 import type { ImportRecord } from '../core/models.ts';
 import type { BackupRecord } from '../core/backup.ts';
 import type { CalendarSyncResult } from '../core/calendar.ts';
+import type { AliasMiss } from '../core/ports.ts';
 import type { LogWriter } from './logger.ts';
 
 interface RemoteTargetOptions {
@@ -152,6 +153,8 @@ export function remoteTarget(base: string, token: string, options: RemoteTargetO
       await request('/restore', 'POST', record);
     },
     stats: () => request('/stats'),
+    aliasMisses: async () =>
+      (await request<{ aliases: AliasMiss[] }>('/stats/alias-misses')).aliases,
     prune: (days: number) => request('/stats/prune', 'POST', { days }),
     retention: (days: number, _enabled: boolean) => request(`/retention?days=${days}`),
     alias: (id: number, name: string) => request(`/subjects/${id}/aliases`, 'POST', { name }),

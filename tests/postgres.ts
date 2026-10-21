@@ -69,9 +69,9 @@ test('PostgreSQL 迁移幂等、事务回滚及错误版本拒绝', async () => 
     assert.equal(await repo.getState('rollback'), null);
     await repo.setState('after_failure', 'ok');
     assert.equal(await repo.getState('after_failure'), 'ok');
-    await repo.query(sql`UPDATE schema_version SET version=2`);
+    await repo.query(sql`UPDATE schema_version SET version=99`);
     await assert.rejects(target.driver.migrate(), /不支持的数据库版本/);
-    assert.deepEqual(await repo.query(sql`SELECT version FROM schema_version`), [{ version: 2 }]);
+    assert.deepEqual(await repo.query(sql`SELECT version FROM schema_version`), [{ version: 99 }]);
   } finally {
     await target.close();
   }
@@ -191,6 +191,8 @@ test('PostgreSQL CLI: 自动迁移、Archive 检查点续跑、别名和跨库�
     });
   try {
     await run(['migrate']);
+    await new SqlRepository(target.driver).recordAliasMisses(['unknown'], 1);
+    assert.equal(JSON.parse((await run(['alias-misses'])).stdout)[0].missCount, 1);
     const args = [
       'sync-archive',
       '--file',

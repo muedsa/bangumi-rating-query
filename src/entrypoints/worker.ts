@@ -11,6 +11,7 @@ import { createServerErrorLogger, requestErrorContext } from '../observability/e
 interface Env {
   DB: D1Database;
   STATS_ENABLED?: string;
+  ALIAS_MISS_STATS_ENABLED?: string;
   ADMIN_TOKEN?: string;
   MAX_BATCH_SIZE?: string;
   RATING_TTL_HOURS?: string;

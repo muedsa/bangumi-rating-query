@@ -2,6 +2,7 @@ import postgres from 'postgres';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { Row, SqlDriver, Statement } from './sql.ts';
+import { MIGRATIONS, readSchemaVersion } from './schema.ts';
 
 // int8 和 SUM(bigint) 的 numeric 结果必须与 SQLite 的 JSON number 契约一致。
 // 超过安全整数范围时拒绝返回，避免静默丢失精度。
@@ -17,18 +18,22 @@ type Query = (statement: Statement) => Promise<Row[]>;
 export async function migratePostgres(query: Query, directory = 'migrations/postgres') {
   await query({ sql: 'SELECT pg_advisory_xact_lock(1650943853, 1)', params: [] });
   const table = await query({ sql: "SELECT to_regclass('schema_version') AS name", params: [] });
-  if (table[0]?.name) {
-    const versions = await query({ sql: 'SELECT version FROM schema_version', params: [] });
-    if (versions.length !== 1 || versions[0]?.version !== 1) throw new Error('不支持的数据库版本');
-    return;
+  const version = table[0]?.name
+    ? readSchemaVersion(
+        (await query({ sql: 'SELECT version FROM schema_version', params: [] })) as {
+          version: number;
+        }[],
+      )
+    : 0;
+  for (const file of MIGRATIONS.slice(version)) {
+    const migration = await readFile(resolve(directory, file), 'utf8');
+    // 当前迁移仅含普通 DDL；逐条执行，兼容预编译查询协议。
+    for (const sql of migration
+      .split(';')
+      .map((s) => s.trim())
+      .filter(Boolean))
+      await query({ sql, params: [] });
   }
-  const migration = await readFile(resolve(directory, '0001_initial.sql'), 'utf8');
-  // 初始迁移仅含普通 DDL；逐条执行，兼容预编译查询协议。
-  for (const sql of migration
-    .split(';')
-    .map((s) => s.trim())
-    .filter(Boolean))
-    await query({ sql, params: [] });
 }
 
 export class PostgresDriver implements SqlDriver {

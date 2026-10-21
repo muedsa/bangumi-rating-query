@@ -8,6 +8,7 @@
   "vars": {
     "BANGUMI_USER_AGENT": "muedsa/bangumi-rating-query (https://github.com/muedsa/bangumi-rating-query)",
     "STATS_ENABLED": "false",
+    "ALIAS_MISS_STATS_ENABLED": "false",
     "MAX_BATCH_SIZE": "20",
     "RATING_TTL_HOURS": "24",
     "CALENDAR_SYNC_ENABLED": "true",

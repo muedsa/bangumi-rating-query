@@ -20,9 +20,12 @@ import { batchResponseSchema } from '../src/http/openapi.ts';
 import { BangumiClient } from '../src/adapters/bangumi/client.ts';
 import { postgresTestDatabase } from './helpers/postgres.ts';
 import './postgres.ts';
+import './migrations.ts';
 
 const token = 'integration-test-token-with-32-characters';
-const migration = readFileSync('migrations/0001_initial.sql', 'utf8');
+const migration = ['0001_initial.sql', '0002_alias_miss_stats.sql']
+  .map((file) => readFileSync(`migrations/${file}`, 'utf8'))
+  .join('\n');
 const asOf = Date.parse('2026-01-01T00:00:00Z');
 
 test('Archive dry-run 默认全量统计，不请求 API、不创建数据库或错误文件', async () => {
@@ -606,6 +609,7 @@ async function runtime(
     calendarSyncEnabled?: boolean;
     calendarPlatformBatchSize?: number;
   },
+  aliasMissStatsEnabled = false,
 ) {
   const logs: string[] = [];
   if (kind !== 'worker') {
@@ -623,6 +627,7 @@ async function runtime(
       readConfig({
         ADMIN_TOKEN: token,
         STATS_ENABLED: String(enabled),
+        ALIAS_MISS_STATS_ENABLED: String(aliasMissStatsEnabled),
         CALENDAR_PLATFORM_BATCH_SIZE: bangumi?.calendarPlatformBatchSize ?? 10,
         BANGUMI_USER_AGENT: bangumi?.userAgent ?? '',
         BANGUMI_ACCESS_TOKEN: bangumi?.accessToken ?? '',
@@ -664,6 +669,7 @@ async function runtime(
       bindings: {
         ADMIN_TOKEN: token,
         STATS_ENABLED: String(enabled),
+        ALIAS_MISS_STATS_ENABLED: String(aliasMissStatsEnabled),
         ...(bangumi
           ? {
               BANGUMI_USER_AGENT: bangumi.userAgent,
@@ -708,6 +714,116 @@ async function runtime(
     close: () => mf.dispose(),
   };
 }
+
+for (const kind of ['node', 'worker', 'postgres'] as const)
+  for (const enabled of [false, true])
+    test(`${kind}: 未命中别名统计开关 ${enabled}，归一化计数、管理鉴权及写入失败隔离`, async () => {
+      const target = await runtime(kind, false, undefined, enabled);
+      const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+      const batch = async (items: unknown[]) => {
+        const response = await target.fetch('/api/v1/ratings/batch', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ items }),
+        });
+        assert.equal(response.status, 200);
+        return (await response.json()) as any;
+      };
+      const stats = async () => {
+        const response = await target.fetch('/api/v1/admin/stats/alias-misses', { headers });
+        assert.equal(response.status, 200);
+        return (await response.json()) as any;
+      };
+      try {
+        assert.equal((await target.fetch('/api/v1/admin/stats/alias-misses')).status, 401);
+        for (const id of [1, 2]) {
+          const response = await target.fetch('/api/v1/admin/import', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(fixture(id, `已知${id}`, ['同名'])),
+          });
+          assert.equal(response.status, 200);
+        }
+        const result = await batch([
+          { inputId: 'a', names: ['已知1', 'Unknown', 'ＵＮＫＮＯＷＮ'] },
+          { inputId: 'b', names: ['unknown', '另一部'] },
+          { inputId: 'filter', names: ['已知1'], year: 1900 },
+          { inputId: 'id', subjectId: 999, names: ['不应记录'] },
+          { inputId: 'link', names: ['https://bgm.tv/subject/999'] },
+          { inputId: 'shared', names: ['同名'] },
+          { inputId: 'number', names: ['86'] },
+        ]);
+        assert.equal(result.results[0].status, 'matched');
+        assert.equal(result.results[2].status, 'not_found');
+        assert.equal(result.results[5].status, 'ambiguous');
+        await batch([{ inputId: 'repeat', names: ['unknown'] }]);
+        const records = await stats();
+        assert.equal(records.enabled, enabled);
+        assert.equal(records.aliases.length, enabled ? 3 : 0);
+        assert.deepEqual(await target.sql('SELECT * FROM subject_usage'), []);
+        if (enabled) {
+          const cli = await promisify(execFile)(
+            process.execPath,
+            ['dist/node/cli.js', 'alias-misses', '--api-url', target.baseUrl],
+            { env: { ...process.env, ADMIN_TOKEN: token } },
+          );
+          assert.deepEqual(JSON.parse(cli.stdout), records.aliases);
+          assert.deepEqual(
+            records.aliases.map((r: any) => [r.normalizedName, r.missCount]).sort(),
+            [
+              ['86', 1],
+              ['unknown', 2],
+              ['另一部', 1],
+            ],
+          );
+          assert(
+            records.aliases.every(
+              (r: any) => typeof r.firstMissedAt === 'number' && r.lastMissedAt >= r.firstMissedAt,
+            ),
+          );
+          const added = await target.fetch('/api/v1/admin/subjects/1/aliases', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ name: 'unknown' }),
+          });
+          assert.equal(added.status, 200);
+          assert.equal(
+            (await batch([{ inputId: 'fixed', names: ['unknown'] }])).results[0].status,
+            'matched',
+          );
+          assert.equal(
+            (await stats()).aliases.find((r: any) => r.normalizedName === 'unknown').missCount,
+            2,
+          );
+          const statement =
+            kind === 'postgres'
+              ? "CREATE FUNCTION reject_miss() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'miss write failure'; END $$; CREATE TRIGGER reject_miss BEFORE INSERT ON alias_miss_stats FOR EACH ROW EXECUTE FUNCTION reject_miss()"
+              : "CREATE TRIGGER reject_miss BEFORE INSERT ON alias_miss_stats BEGIN SELECT RAISE(ABORT, 'miss write failure'); END";
+          await target.sql(statement);
+          const failed = await batch([{ inputId: 'fail', names: ['未知私密名称', '已知1'] }]);
+          assert.equal(failed.results[0].status, 'matched');
+          for (
+            let i = 0;
+            i < 20 && !target.logs.some((line) => line.includes('alias_miss_write_failed'));
+            i++
+          )
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          const log = target.logs.find((line) => line.includes('alias_miss_write_failed'));
+          assert(log);
+          assert(!log.includes('未知私密名称'));
+          assert.equal((await stats()).aliases.length, 3);
+        } else {
+          // 关闭时无需访问统计表，迁移异常也不能引入额外查询故障。
+          await target.sql('DROP TABLE alias_miss_stats');
+          assert.equal(
+            (await batch([{ inputId: 'off', names: ['不存在'] }])).results[0].status,
+            'not_found',
+          );
+        }
+      } finally {
+        await target.close();
+      }
+    });
 
 for (const kind of ['node', 'worker', 'postgres'] as const) {
   test(`${kind}: 导入与手动别名互补季数，补全第一季并支持反向导入和幂等刷新`, async () => {
@@ -1373,7 +1489,7 @@ for (const databaseDriver of ['sqlite', 'postgres'] as const)
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), {
         status: 'ok',
-        schemaVersion: 1,
+        schemaVersion: 2,
         statisticsEnabled: false,
       });
     } finally {

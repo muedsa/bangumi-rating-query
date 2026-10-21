@@ -1,5 +1,6 @@
 import type { SQL } from 'drizzle-orm';
-import type { ApplicationRepository } from '../../core/ports.ts';
+import type { AliasMiss, ApplicationRepository } from '../../core/ports.ts';
+import { SCHEMA_VERSION } from './schema.ts';
 import type { BackupRecord } from '../../core/backup.ts';
 import { calendarSnapshotSchema, type CalendarSnapshot } from '../../core/calendar.ts';
 import { exportPage, restoreRecord } from './backup.ts';
@@ -99,7 +100,7 @@ export class SqlRepository implements ApplicationRepository {
   }
   async ready() {
     const rows = await this.query<{ version: number }>(sql`SELECT version FROM schema_version`);
-    return rows.some((r) => r.version === 1);
+    return rows.length === 1 && rows[0]?.version === SCHEMA_VERSION;
   }
   async findSubjects(ids: number[]): Promise<Subject[]> {
     const rows: Subject[] = [];
@@ -252,6 +253,25 @@ export class SqlRepository implements ApplicationRepository {
       (await this.query<{ value: string }>(sql`SELECT value FROM sync_state WHERE key=${key}`))[0]
         ?.value ?? null
     );
+  }
+  async recordAliasMisses(names: string[], now: number) {
+    const unique = new Map(names.map((name) => [normalizeName(name), name.trim()]));
+    if (!unique.size) return;
+    const d = this.dialect;
+    const items = [...unique].map(([normalizedName, name]) => ({ normalizedName, name }));
+    await this
+      .query(sql`INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at)
+      SELECT ${d.value('normalizedName')},${d.value('name')},1,${now},${now} FROM ${d.each(items)} WHERE true
+      ON CONFLICT(normalized_name) DO UPDATE SET miss_count=alias_miss_stats.miss_count+1,
+        name=CASE WHEN excluded.last_missed_at >= alias_miss_stats.last_missed_at THEN excluded.name ELSE alias_miss_stats.name END,
+        first_missed_at=CASE WHEN excluded.first_missed_at < alias_miss_stats.first_missed_at THEN excluded.first_missed_at ELSE alias_miss_stats.first_missed_at END,
+        last_missed_at=CASE WHEN excluded.last_missed_at > alias_miss_stats.last_missed_at THEN excluded.last_missed_at ELSE alias_miss_stats.last_missed_at END`);
+  }
+  aliasMissStats() {
+    return this
+      .query<AliasMiss>(sql`SELECT name, normalized_name AS "normalizedName", miss_count AS "missCount",
+      first_missed_at AS "firstMissedAt", last_missed_at AS "lastMissedAt" FROM alias_miss_stats
+      ORDER BY miss_count DESC, last_missed_at DESC, normalized_name LIMIT 100`);
   }
   async setState(key: string, value: string) {
     await this

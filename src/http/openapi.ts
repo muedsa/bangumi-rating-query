@@ -181,6 +181,24 @@ export function getOpenApi(maxBatchSize: number) {
       '/api/v1/admin/stats': {
         get: operation('最近 7/30 天及累计热度，最多 100 条', anyObject, { admin: true }),
       },
+      '/api/v1/admin/stats/alias-misses': {
+        get: operation(
+          '未知别名的累计未命中次数，按次数降序最多 100 条',
+          z.object({
+            enabled: z.boolean(),
+            aliases: z.array(
+              z.object({
+                name: z.string(),
+                normalizedName: z.string(),
+                missCount: z.number().int().positive(),
+                firstMissedAt: z.number().int(),
+                lastMissedAt: z.number().int(),
+              }),
+            ),
+          }),
+          { admin: true },
+        ),
+      },
       '/api/v1/admin/stats/prune': {
         post: operation(
           '分批清理历史每日统计；累计次数与最近访问时间不变',

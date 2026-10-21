@@ -2,6 +2,14 @@ import type { Alias, ImportRecord, Rating, Subject } from './models.ts';
 import type { BackupPage, BackupRecord } from './backup.ts';
 import type { CalendarSnapshot } from './calendar.ts';
 
+export interface AliasMiss {
+  name: string;
+  normalizedName: string;
+  missCount: number;
+  firstMissedAt: number;
+  lastMissedAt: number;
+}
+
 export interface SubjectSource {
   getSubject(id: number): Promise<ImportRecord>;
 }
@@ -22,6 +30,7 @@ export interface AnimeRepository {
   deleteManualAlias(id: string): Promise<boolean>;
   importRecord(record: ImportRecord): Promise<void>;
   recordHits(ids: number[], now: number): Promise<void>;
+  recordAliasMisses(names: string[], now: number): Promise<void>;
 }
 
 /** HTTP 层依赖完整业务存储契约，而不是具体 SQL 驱动。 */
@@ -34,6 +43,7 @@ export interface ApplicationRepository extends AnimeRepository {
   exportPage(after: number): Promise<BackupPage>;
   restoreRecord(record: BackupRecord): Promise<void>;
   stats(): Promise<Record<string, unknown>[]>;
+  aliasMissStats(): Promise<AliasMiss[]>;
   pruneDaily(days: number): Promise<{ deleted: number; hasMore: boolean }>;
   retentionPreview(
     days: number,

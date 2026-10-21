@@ -1,0 +1,109 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
+import { SqliteDriver } from '../src/adapters/storage/sqlite.ts';
+import { SqlRepository } from '../src/adapters/storage/repository.ts';
+import { postgresTestDatabase } from './helpers/postgres.ts';
+
+test('SQLite 旧版库升级保留数据，失败回滚并可重试，旧版库暂不就绪', async () => {
+  const driver = new SqliteDriver(':memory:');
+  const repo = new SqlRepository(driver);
+  try {
+    driver.db.exec(await readFile('migrations/0001_initial.sql', 'utf8'));
+    driver.db.exec("INSERT INTO subjects(id,name,metadata_at,cached_at) VALUES(1,'旧数据',1,1)");
+    assert.equal(await repo.ready(), false);
+    const broken = await mkdtemp(join(tmpdir(), 'bangumi-schema-v2-'));
+    await writeFile(
+      join(broken, '0002_alias_miss_stats.sql'),
+      'CREATE TABLE alias_miss_stats(id INTEGER); INSERT INTO missing_table VALUES(1);',
+    );
+    assert.throws(() => driver.migrate(broken));
+    assert.equal(driver.db.prepare('SELECT version FROM schema_version').get()!.version, 1);
+    assert.equal(
+      driver.db.prepare("SELECT 1 FROM sqlite_master WHERE name='alias_miss_stats'").get(),
+      undefined,
+    );
+    driver.migrate();
+    driver.migrate();
+    assert.equal(await repo.ready(), true);
+    assert.equal((await repo.findSubjects([1]))[0]?.name, '旧数据');
+    await repo.recordAliasMisses(['Missing', 'ＭＩＳＳＩＮＧ'], 100);
+    await repo.recordAliasMisses(['missing'], 50);
+    const rows = await repo.aliasMissStats();
+    assert.equal(rows[0]?.missCount, 2);
+    assert.equal(rows[0]?.firstMissedAt, 50);
+    assert.equal(rows[0]?.lastMissedAt, 100);
+    await Promise.all(
+      Array.from({ length: 5 }, (_, i) => repo.recordAliasMisses(['missing'], 101 + i)),
+    );
+    assert.equal((await repo.aliasMissStats())[0]?.missCount, 7);
+    assert.equal(rows[0]?.name, 'ＭＩＳＳＩＮＧ');
+    driver.db.exec('UPDATE schema_version SET version=99');
+    assert.throws(() => driver.migrate(), /不支持的数据库版本/);
+  } finally {
+    driver.close();
+  }
+});
+
+test('PostgreSQL 旧版库升级保留数据并支持未命中别名统计', async () => {
+  const target = await postgresTestDatabase(false);
+  const repo = new SqlRepository(target.driver);
+  try {
+    await target.driver.query({
+      sql: await readFile('migrations/postgres/0001_initial.sql', 'utf8'),
+      params: [],
+    });
+    await target.driver.query({
+      sql: "INSERT INTO subjects(id,name,metadata_at,cached_at) VALUES(1,'旧数据',1,1)",
+      params: [],
+    });
+    assert.equal(await repo.ready(), false);
+    await target.driver.migrate();
+    await target.driver.migrate();
+    assert.equal(await repo.ready(), true);
+    assert.equal((await repo.findSubjects([1]))[0]?.name, '旧数据');
+    await repo.recordAliasMisses(['Missing', 'ＭＩＳＳＩＮＧ'], 100);
+    await repo.recordAliasMisses(['missing'], 50);
+    const rows = await repo.aliasMissStats();
+    assert.equal(rows[0]?.missCount, 2);
+    assert.equal(rows[0]?.firstMissedAt, 50);
+    assert.equal(rows[0]?.lastMissedAt, 100);
+  } finally {
+    await target.close();
+  }
+});
+
+test('D1 按顺序应用增量迁移后保留旧数据并更新 schema_version', async () => {
+  const mf = new Miniflare(
+    convertV4MiniflareOptions({
+      modules: true,
+      scriptPath: 'dist/worker.js',
+      compatibilityDate: '2026-10-20',
+      d1Databases: ['DB'],
+    }),
+  );
+  try {
+    const db = await mf.getD1Database('DB');
+    for (const file of ['0001_initial.sql', '0002_alias_miss_stats.sql']) {
+      for (const statement of (await readFile(`migrations/${file}`, 'utf8'))
+        .split(';')
+        .map((s) => s.trim())
+        .filter(Boolean))
+        await db.prepare(statement).run();
+      if (file === '0001_initial.sql')
+        await db
+          .prepare("INSERT INTO subjects(id,name,metadata_at,cached_at) VALUES(1,'旧数据',1,1)")
+          .run();
+    }
+    assert.equal((await db.prepare('SELECT version FROM schema_version').first())?.version, 2);
+    assert.equal(
+      (await db.prepare('SELECT name FROM subjects WHERE id=1').first())?.name,
+      '旧数据',
+    );
+  } finally {
+    await mf.dispose();
+  }
+});
