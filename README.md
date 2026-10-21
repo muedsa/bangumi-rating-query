@@ -109,6 +109,35 @@ docker compose exec api node dist/node/cli.js sync-subject --id 123
 
 使用内置 SQLite 时按单实例部署，数据库目录需要可写。不要把 SQLite 文件放到多个容器共享的网络文件系统上。
 
+### GHCR 预构建镜像
+
+[镜像发布工作流](.github/workflows/publish-container.yml) 使用现有 Dockerfile 构建 `linux/amd64` 镜像，并发布到 `ghcr.io/<小写仓库所有者>/<小写仓库名>`。发布前会调用验证工作流执行 `bun run check`，检查失败时不会发布。
+
+| 触发方式                          | 镜像标签                                                   |
+| --------------------------------- | ---------------------------------------------------------- |
+| 推送到 `main`                     | `latest`、`main`、`sha-<完整提交 SHA>`                     |
+| 推送 `v*` Git 标签，例如 `v0.1.0` | `v0.1.0`、`sha-<完整提交 SHA>`                             |
+| Actions 页面手动运行              | 选择 `main` 或 `v*` 标签，规则同上；其他分支只检查，不发布 |
+
+`latest` 跟随 `main`，版本标签（包括预发布标签）不会覆盖它。生产部署建议使用明确版本或镜像 digest。
+
+工作流使用 GitHub 自动提供的 `GITHUB_TOKEN`，仅发布任务申请 `packages: write`，无需额外配置 PAT。仓库或组织需允许 Actions 写入 Packages；如果 GHCR 已有同名包，请在包的 **Manage Actions access** 中授予当前仓库写入权限。首次发布的包可能是私有的，需要在包设置中设为 Public 才能匿名拉取，私有包则需先登录 GHCR。
+
+首次发布成功后可直接运行（`.env` 沿用 Node 部署配置，数据库写入命名卷）：
+
+```sh
+docker pull ghcr.io/muedsa/bangumi-rating-query:latest
+docker run -d --name bangumi-rating-query --restart unless-stopped \
+  -p 127.0.0.1:3000:3000 --env-file .env \
+  -e DATABASE_PATH=/app/data/bangumi.sqlite \
+  -v bangumi-data:/app/data \
+  ghcr.io/muedsa/bangumi-rating-query:latest
+```
+
+上述多行命令使用 POSIX shell 语法；PowerShell 可合并为一行执行。Fork 仓库请替换镜像地址。现有 `docker compose up --build -d` 仍从本地源码构建。
+
+工作流中的 Action 使用大版本标签（例如 `actions/setup-node@v7`），跟随上游维护的同一大版本更新；升级到新的大版本时需调整对应的 `uses` 版本。
+
 ## 批量查询
 
 `POST /api/v1/ratings/batch`：
