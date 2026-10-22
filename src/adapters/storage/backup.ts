@@ -2,6 +2,7 @@ import { AppError } from '../../core/models.ts';
 import { backupSchema, type BackupRecord } from '../../core/backup.ts';
 import { chunks, sql } from './sql.ts';
 import type { SqlRepository } from './repository.ts';
+import { clearAliasMissesStatement } from './alias-misses.ts';
 
 export async function exportPage(repo: SqlRepository, after: number, limit = 5) {
   const ids = await repo.query<{ id: number }>(
@@ -47,6 +48,13 @@ export async function restoreRecord(repo: SqlRepository, input: BackupRecord) {
         sql`, `,
       )}`);
   }
+  if (record.aliases.length)
+    statements.push(
+      clearAliasMissesStatement(
+        repo.dialect,
+        record.aliases.map((alias) => alias.name),
+      ),
+    );
   const r = record.rating;
   if (r)
     statements.push(sql`INSERT INTO ratings_current(subject_id,score,votes,rank,source,data_as_of,fetched_at)

@@ -18,6 +18,7 @@ import { extractSubjects } from '../src/cli/archive.ts';
 import type { ImportRecord } from '../src/core/models.ts';
 import { batchResponseSchema } from '../src/http/openapi.ts';
 import { BangumiClient } from '../src/adapters/bangumi/client.ts';
+import { QueryService } from '../src/core/query-service.ts';
 import { postgresTestDatabase } from './helpers/postgres.ts';
 import './postgres.ts';
 import './migrations.ts';
@@ -715,6 +716,38 @@ async function runtime(
   };
 }
 
+for (const kind of ['node', 'postgres'] as const)
+  test(`${kind}: 查询后补充别名，延迟未命中计数不会重建已清理记录`, async () => {
+    const pg = kind === 'postgres' ? await postgresTestDatabase() : undefined;
+    const driver = pg?.driver ?? new SqliteDriver(':memory:');
+    await driver.migrate();
+    const repo = new SqlRepository(driver);
+    try {
+      await repo.importRecord(fixture(1, '原名称', []));
+      await repo.recordAliasMisses(['Pending'], asOf);
+      const findAliases = repo.findAliases.bind(repo);
+      repo.findAliases = async (keys) => {
+        const matches = await findAliases(keys);
+        await repo.addManualAlias(1, 'pending', asOf + 1);
+        assert.deepEqual(await repo.aliasMissStats(), []);
+        return matches;
+      };
+      const service = new QueryService(repo, {
+        statsEnabled: false,
+        aliasMissStatsEnabled: true,
+        ratingTtlHours: 24,
+      });
+      await service.batch([{ inputId: 'delayed', names: ['ＰＥＮＤＩＮＧ', '仍然未知'] }]);
+      assert.deepEqual(
+        (await repo.aliasMissStats()).map((row) => row.normalizedName),
+        ['仍然未知'],
+      );
+    } finally {
+      if (pg) await pg.close();
+      else await driver.close();
+    }
+  });
+
 for (const kind of ['node', 'worker', 'postgres'] as const)
   for (const enabled of [false, true])
     test(`${kind}: 未命中别名统计开关 ${enabled}，归一化计数、管理鉴权及写入失败隔离`, async () => {
@@ -791,10 +824,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
             (await batch([{ inputId: 'fixed', names: ['unknown'] }])).results[0].status,
             'matched',
           );
-          assert.equal(
-            (await stats()).aliases.find((r: any) => r.normalizedName === 'unknown').missCount,
-            2,
-          );
+          assert(!(await stats()).aliases.some((r: any) => r.normalizedName === 'unknown'));
           const statement =
             kind === 'postgres'
               ? "CREATE FUNCTION reject_miss() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'miss write failure'; END $$; CREATE TRIGGER reject_miss BEFORE INSERT ON alias_miss_stats FOR EACH ROW EXECUTE FUNCTION reject_miss()"
@@ -811,8 +841,17 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
           const log = target.logs.find((line) => line.includes('alias_miss_write_failed'));
           assert(log);
           assert(!log.includes('未知私密名称'));
-          assert.equal((await stats()).aliases.length, 3);
+          assert.equal((await stats()).aliases.length, 2);
         } else {
+          // 关闭开关只停止查询计数，补充别名仍应清理之前积累的记录。
+          await target.sql("INSERT INTO alias_miss_stats VALUES ('unknown','Unknown',2,1,2)");
+          const added = await target.fetch('/api/v1/admin/subjects/1/aliases', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ name: 'ＵＮＫＮＯＷＮ' }),
+          });
+          assert.equal(added.status, 200);
+          assert.deepEqual((await stats()).aliases, []);
           // 关闭时无需访问统计表，迁移异常也不能引入额外查询故障。
           await target.sql('DROP TABLE alias_miss_stats');
           assert.equal(
@@ -826,6 +865,171 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
     });
 
 for (const kind of ['node', 'worker', 'postgres'] as const) {
+  test(`${kind}: 别名写入清理未命中记录，覆盖导入、手动修改、季数补全、日历和恢复`, async () => {
+    const target = await runtime(
+      kind,
+      false,
+      {
+        userAgent: 'test/alias-misses',
+        accessToken: '',
+        fetcher: (async (url) =>
+          String(url).endsWith('/calendar')
+            ? Response.json([
+                {
+                  items: [
+                    { id: 13, type: 2, name: '日历' },
+                    { id: 17, type: 2, name: '日历跳过' },
+                  ],
+                },
+              ])
+            : Response.json({
+                id: Number(String(url).split('/').pop()),
+                type: 2,
+                platform: 'TV',
+              })) as typeof fetch,
+      },
+      true,
+    );
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const send = async (path: string, body: unknown, method = 'POST') => {
+      const response = await target.fetch(path, { method, headers, body: JSON.stringify(body) });
+      assert.equal(response.status, 200, await response.clone().text());
+      return (await response.json()) as any;
+    };
+    const remaining = async () =>
+      (
+        await target.sql('SELECT normalized_name FROM alias_miss_stats ORDER BY normalized_name')
+      ).map((row) => row.normalized_name);
+    try {
+      const missing = [
+        '原作',
+        '中文11',
+        '导入 别称',
+        '原作第2季',
+        '原作第二季',
+        '原作第一季',
+        '原作第1季',
+        ' ＡＢＣ　 别称 ',
+        '改名第三季',
+        '改名第3季',
+        '日历',
+        '日历跳过',
+        '恢复名',
+        '恢复别称',
+        '仍然未知',
+        '过期导入',
+      ];
+      await send('/api/v1/ratings/batch', {
+        items: missing.map((name, i) => ({ inputId: String(i), names: [name] })),
+      });
+      assert.equal((await remaining()).length, missing.length);
+      await send('/api/v1/admin/import', fixture(11, '原作', ['导入 别称']));
+      for (const name of ['原作', '中文11', '导入 别称'])
+        assert(!(await remaining()).includes(name));
+      await send('/api/v1/admin/import', fixture(12, '原作第二季', []));
+      for (const name of ['原作第2季', '原作第二季', '原作第一季', '原作第1季'])
+        assert(!(await remaining()).includes(name), name);
+      const manual = await send('/api/v1/admin/subjects/11/aliases', { name: 'abc 别称' });
+      assert(!(await remaining()).includes('abc 别称'));
+      // 重复添加已存在的别名，也能清理旧版本遗留的统计。
+      await target.sql("INSERT INTO alias_miss_stats VALUES ('abc 别称','ABC 别称',2,1,2)");
+      const repeated = await send('/api/v1/admin/subjects/11/aliases', { name: 'abc 别称' });
+      assert.equal(repeated.alias.id, manual.alias.id);
+      assert(!(await remaining()).includes('abc 别称'));
+      await send(`/api/v1/admin/aliases/${manual.alias.id}`, { name: '改名第三季' }, 'PATCH');
+      assert(!(await remaining()).includes('改名第三季'));
+      assert(!(await remaining()).includes('改名第3季'));
+      // 旧快照没有实际写入别名，不能清理对应的未命中项。
+      const older = fixture(11, '过期导入', []);
+      older.subject.metadataAt--;
+      await send('/api/v1/admin/import', older);
+      await send('/api/v1/admin/import', fixture(17, '满额', []));
+      await target.sql(`WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<248)
+        INSERT INTO subject_aliases SELECT 'full-'||n,17,'满额'||n,'满额'||n,'manual',1,1 FROM nums`);
+      await send('/api/v1/admin/calendar/sync', {});
+      // 日历遇到别名上限会跳过该条目，仍未知的名称必须保留。
+      assert((await remaining()).includes('日历跳过'));
+      assert.deepEqual(await target.sql("SELECT * FROM subject_aliases WHERE name='日历跳过'"), []);
+      const restored = fixture(14, '恢复名', []);
+      await send('/api/v1/admin/restore', {
+        version: 1,
+        subject: restored.subject,
+        aliases: [
+          {
+            id: crypto.randomUUID(),
+            subjectId: 14,
+            name: '恢复别称',
+            normalizedName: '恢复别称',
+            source: 'manual',
+            createdAt: asOf,
+            updatedAt: asOf,
+          },
+        ],
+        rating: restored.rating,
+        usage: null,
+        daily: [],
+      });
+      // 备份只清理实际恢复的别名，不把条目元数据当作可查询的别名。
+      assert.deepEqual(await remaining(), ['仍然未知', '恢复名', '过期导入', '日历跳过'].sort());
+      // 清理参数同样要支持导入上限，避免超过 D1 每条语句 100 个参数的限制。
+      await target.sql(`WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<200)
+        INSERT INTO alias_miss_stats SELECT '批量'||n,'批量'||n,1,1,1 FROM nums`);
+      await send(
+        '/api/v1/admin/import',
+        fixture(
+          16,
+          '大批量',
+          Array.from({ length: 200 }, (_, i) => `批量${i + 1}`),
+        ),
+      );
+      assert.deepEqual(await remaining(), ['仍然未知', '恢复名', '过期导入', '日历跳过'].sort());
+    } finally {
+      await target.close();
+    }
+  });
+
+  test(`${kind}: 未命中清理失败时别名写入整体回滚，重试后一起生效`, async () => {
+    const target = await runtime(kind, false, undefined, true);
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const send = (path: string, body: unknown) =>
+      target.fetch(path, { method: 'POST', headers, body: JSON.stringify(body) });
+    try {
+      assert.equal(
+        (
+          await send('/api/v1/ratings/batch', {
+            items: [{ inputId: 'rollback', names: ['事务清理', '仍然未知'] }],
+          })
+        ).status,
+        200,
+      );
+      const before = await target.sql('SELECT * FROM alias_miss_stats ORDER BY normalized_name');
+      await target.sql(
+        kind === 'postgres'
+          ? "CREATE FUNCTION reject_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'cleanup failure'; END $$; CREATE TRIGGER reject_cleanup BEFORE DELETE ON alias_miss_stats FOR EACH ROW EXECUTE FUNCTION reject_cleanup()"
+          : "CREATE TRIGGER reject_cleanup BEFORE DELETE ON alias_miss_stats BEGIN SELECT RAISE(ABORT, 'cleanup failure'); END",
+      );
+      assert.equal((await send('/api/v1/admin/import', fixture(15, '事务清理', []))).status, 503);
+      assert.deepEqual(await target.sql('SELECT * FROM subjects WHERE id=15'), []);
+      assert.deepEqual(await target.sql('SELECT * FROM subject_aliases WHERE subject_id=15'), []);
+      assert.deepEqual(
+        await target.sql('SELECT * FROM alias_miss_stats ORDER BY normalized_name'),
+        before,
+      );
+      await target.sql(
+        kind === 'postgres'
+          ? 'DROP TRIGGER reject_cleanup ON alias_miss_stats'
+          : 'DROP TRIGGER reject_cleanup',
+      );
+      assert.equal((await send('/api/v1/admin/import', fixture(15, '事务清理', []))).status, 200);
+      assert.deepEqual(
+        await target.sql('SELECT * FROM alias_miss_stats'),
+        before.filter((row) => row.normalized_name === '仍然未知'),
+      );
+    } finally {
+      await target.close();
+    }
+  });
+
   test(`${kind}: 导入与手动别名互补季数，补全第一季并支持反向导入和幂等刷新`, async () => {
     const target = await runtime(kind, false);
     const auth = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };

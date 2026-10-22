@@ -4,13 +4,14 @@ import { seasonAlias } from '../../core/season-aliases.ts';
 import type { SQL } from 'drizzle-orm';
 import { sql } from './sql.ts';
 import type { SqlRepository } from './repository.ts';
+import { clearAliasMissesStatement } from './alias-misses.ts';
 
 type Seed = Pick<Alias, 'subjectId' | 'name' | 'source'>;
 type Match = Seed & Pick<Alias, 'normalizedName'>;
 type Reader = Pick<SqlRepository, 'query' | 'dialect'>;
 
-/** 在同一事务中写入原别名、季数互补别名及唯一匹配的第一季别名。 */
-export async function aliasInsertStatement(
+/** 在同一事务中写入原别名、季数互补别名及第一季别名，并清理对应未命中记录。 */
+export async function aliasInsertStatements(
   repo: Reader,
   seeds: Seed[],
   now: number,
@@ -20,8 +21,8 @@ export async function aliasInsertStatement(
     skipFullSubjects?: boolean;
     guard?: SQL;
   } = {},
-): Promise<SQL | null> {
-  if (!seeds.length) return null;
+): Promise<SQL[]> {
+  if (!seeds.length) return [];
   const d = repo.dialect;
   const retained = sql`NOT (source='bangumi' AND subject_id IN (
     ${d.values(options.replaceBangumiIds ?? [], 'integer')}
@@ -100,7 +101,8 @@ export async function aliasInsertStatement(
       for (const name of secondNames(seed.name))
         for (const second of matches.get(normalizeName(name)) ?? []) inferFirst(second);
   }
-  if (!pending.size) return null;
+  const seedNames = seeds.map((seed) => seed.name);
+  if (!pending.size) return [clearAliasMissesStatement(d, seedNames)];
   const ids = [...new Set([...pending.values()].map((alias) => alias.subjectId))];
   const counts = new Map(
     (
@@ -123,10 +125,15 @@ export async function aliasInsertStatement(
       ...alias,
       id: crypto.randomUUID(),
     }));
-  if (!additions.length) return null;
-  return sql`INSERT INTO subject_aliases(id,subject_id,name,normalized_name,source,created_at,updated_at)
+  const statements: SQL[] = [];
+  if (additions.length)
+    statements.push(sql`INSERT INTO subject_aliases(id,subject_id,name,normalized_name,source,created_at,updated_at)
     SELECT ${d.value('id')},${d.value('subjectId', 'integer')},${d.value('name')},
       ${d.value('normalizedName')},${d.value('source')},${now},${now}
     FROM ${d.each(additions)} WHERE ${options.guard ?? sql`true`}
-    ON CONFLICT(subject_id,name,source) DO NOTHING`;
+    ON CONFLICT(subject_id,name,source) DO NOTHING`);
+  statements.push(
+    clearAliasMissesStatement(d, [...seedNames, ...additions.map((alias) => alias.name)]),
+  );
+  return statements;
 }

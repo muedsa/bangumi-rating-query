@@ -21,7 +21,7 @@ import {
   type Row,
   type SqlDriver,
 } from './sql.ts';
-import { aliasInsertStatement } from './season-aliases.ts';
+import { aliasInsertStatements } from './season-aliases.ts';
 
 const subjectColumns = sql`id, name, name_cn AS "nameCn", air_date AS "airDate", platform,
   metadata_at AS "metadataAt", cached_at AS "cachedAt", pinned`;
@@ -82,8 +82,9 @@ export class SqlRepository implements ApplicationRepository {
         ${d.value('airDate')},'',0,${now},0 FROM ${d.each(items)} WHERE true
       ON CONFLICT(id) DO NOTHING`);
     // 日历只有名称；只补充名称，绝不删除已有官方/手动别名。
-    const aliasInsert = await aliasInsertStatement(this, aliases, now, { skipFullSubjects: true });
-    if (aliasInsert) statements.push(aliasInsert);
+    statements.push(
+      ...(await aliasInsertStatements(this, aliases, now, { skipFullSubjects: true })),
+    );
     const ratings = items.filter((item) => item.rating !== null);
     if (ratings.length)
       statements.push(sql`INSERT INTO ratings_current(subject_id,score,votes,rank,source,data_as_of,fetched_at)
@@ -143,12 +144,12 @@ export class SqlRepository implements ApplicationRepository {
     return rows;
   }
   async addManualAlias(subjectId: number, name: string, now: number) {
-    const statement = await aliasInsertStatement(
+    const statements = await aliasInsertStatements(
       this,
       [{ subjectId, name, source: 'manual' }],
       now,
     );
-    if (statement) await this.batch([statement]);
+    if (statements.length) await this.batch(statements);
     const rows = await this.query<Alias>(sql`SELECT ${aliasColumns} FROM subject_aliases
       WHERE subject_id=${subjectId} AND name=${name} AND source='manual'`);
     return rows[0]!;
@@ -160,7 +161,7 @@ export class SqlRepository implements ApplicationRepository {
       )
     )[0];
     if (!original) return null;
-    const aliasInsert = await aliasInsertStatement(
+    const aliasStatements = await aliasInsertStatements(
       this,
       [{ subjectId: original.subjectId, name, source: 'manual' }],
       now,
@@ -175,7 +176,7 @@ export class SqlRepository implements ApplicationRepository {
         sql`UPDATE subject_aliases SET name = ${name}, normalized_name = ${normalizeName(name)},
         updated_at = ${now} WHERE id = ${id} AND source = 'manual' RETURNING ${aliasColumns}`,
       ];
-      if (aliasInsert) statements.push(aliasInsert);
+      statements.push(...aliasStatements);
       const rows = await this.batch(statements);
       return (rows[0]?.[0] as Alias | undefined) ?? null;
     } catch (error) {
@@ -203,7 +204,7 @@ export class SqlRepository implements ApplicationRepository {
         WHERE excluded.metadata_at > subjects.metadata_at`);
       statements.push(sql`DELETE FROM subject_aliases WHERE subject_id=${s.id} AND source='bangumi'
         AND EXISTS (SELECT 1 FROM subjects WHERE id=${s.id} AND metadata_at=${s.metadataAt})`);
-      const aliasInsert = await aliasInsertStatement(
+      const aliasStatements = await aliasInsertStatements(
         this,
         names.map((name) => ({ subjectId: s.id, name, source: 'bangumi' })),
         s.cachedAt,
@@ -212,7 +213,7 @@ export class SqlRepository implements ApplicationRepository {
           guard: sql`EXISTS (SELECT 1 FROM subjects WHERE id=${s.id} AND metadata_at=${s.metadataAt})`,
         },
       );
-      if (aliasInsert) statements.push(aliasInsert);
+      statements.push(...aliasStatements);
     }
     const r = record.rating;
     if (r) {
@@ -259,9 +260,11 @@ export class SqlRepository implements ApplicationRepository {
     if (!unique.size) return;
     const d = this.dialect;
     const items = [...unique].map(([normalizedName, name]) => ({ normalizedName, name }));
+    // 查询与计数之间可能已补充别名；写入前重新检查，避免延迟计数重建已清理的记录。
     await this
       .query(sql`INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at)
-      SELECT ${d.value('normalizedName')},${d.value('name')},1,${now},${now} FROM ${d.each(items)} WHERE true
+      SELECT ${d.value('normalizedName')},${d.value('name')},1,${now},${now} FROM ${d.each(items)}
+      WHERE NOT EXISTS (SELECT 1 FROM subject_aliases WHERE normalized_name=${d.value('normalizedName')})
       ON CONFLICT(normalized_name) DO UPDATE SET miss_count=alias_miss_stats.miss_count+1,
         name=CASE WHEN excluded.last_missed_at >= alias_miss_stats.last_missed_at THEN excluded.name ELSE alias_miss_stats.name END,
         first_missed_at=CASE WHEN excluded.first_missed_at < alias_miss_stats.first_missed_at THEN excluded.first_missed_at ELSE alias_miss_stats.first_missed_at END,
