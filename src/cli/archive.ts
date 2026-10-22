@@ -7,6 +7,7 @@ import { Readable, Transform } from 'node:stream';
 import { Unzip, UnzipInflate } from 'fflate';
 import { z } from 'zod';
 import { createInterface } from 'node:readline';
+import { checkCancelled } from './cancellation.ts';
 
 export async function* archiveLines(path: string) {
   const reader = createInterface({
@@ -23,13 +24,16 @@ export async function* archiveLines(path: string) {
   }
 }
 
-export async function sha256File(path: string) {
+export async function sha256File(path: string, signal?: AbortSignal) {
   const hash = createHash('sha256');
-  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  for await (const chunk of createReadStream(path)) {
+    checkCancelled(signal);
+    hash.update(chunk);
+  }
   return hash.digest('hex');
 }
 
-export async function extractSubjects(zipPath: string, output: string) {
+export async function extractSubjects(zipPath: string, output: string, signal?: AbortSignal) {
   await mkdir(dirname(output), { recursive: true });
   const file = await open(`${output}.partial`, 'w');
   let found = false;
@@ -56,6 +60,7 @@ export async function extractSubjects(zipPath: string, output: string) {
   unzip.register(UnzipInflate);
   try {
     for await (const chunk of createReadStream(zipPath, { highWaterMark: 64 * 1024 })) {
+      checkCancelled(signal);
       unzip.push(new Uint8Array(chunk), false);
       if (failure) throw failure;
       for (const buffer of buffers) await file.writeFile(buffer);
@@ -74,11 +79,16 @@ export async function extractSubjects(zipPath: string, output: string) {
 export async function downloadArchive(
   output: string,
   onProgress?: (progress: Record<string, unknown>) => void,
+  signal?: AbortSignal,
 ) {
   onProgress?.({ phase: 'archive_manifest', output });
   const response = await fetch(
     'https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json',
-    { signal: AbortSignal.timeout(30000) },
+    {
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(30000)])
+        : AbortSignal.timeout(30000),
+    },
   );
   if (!response.ok) throw new Error(`Archive 清单读取失败：${response.status}`);
   const manifest = z
@@ -90,7 +100,9 @@ export async function downloadArchive(
     .parse(await response.json());
   onProgress?.({ phase: 'archive_download', output, downloadedBytes: 0 });
   const archive = await fetch(manifest.browser_download_url, {
-    signal: AbortSignal.timeout(30 * 60 * 1000),
+    signal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(30 * 60 * 1000)])
+      : AbortSignal.timeout(30 * 60 * 1000),
   });
   if (!archive.ok || !archive.body) throw new Error(`Archive 下载失败：${archive.status}`);
   await mkdir(dirname(output), { recursive: true });
@@ -110,12 +122,13 @@ export async function downloadArchive(
       },
     }),
     createWriteStream(`${output}.zip.partial`),
+    { signal },
   );
   if (`sha256:${hash.digest('hex')}` !== manifest.digest)
     throw new Error('Archive SHA-256 校验失败');
   await rename(`${output}.zip.partial`, `${output}.zip`);
   onProgress?.({ phase: 'archive_extract', output, downloadedBytes });
-  await extractSubjects(`${output}.zip`, output);
+  await extractSubjects(`${output}.zip`, output, signal);
   onProgress?.({ phase: 'archive_hash', output });
   await writeFile(
     `${output}.meta.json`,

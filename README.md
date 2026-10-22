@@ -266,6 +266,47 @@ CLI 同样可添加：
 bun run cli alias-add --id 100 --name 我的别名
 ```
 
+## CLI 交互与脚本模式
+
+构建后，不带子命令即可打开主菜单：
+
+```sh
+bun run build:node
+bun run cli
+```
+
+使用方向键选择、回车确认。先选择本地数据库或远程 Worker / Node 服务，再选择导入、同步、处理未命中别名、查看统计等操作；完成后返回菜单，也可切换目标。连接配置仍从环境变量或 `.env` 读取，菜单选择仅在本次运行中生效，不写回配置文件。
+
+界面使用 `@clack/prompts`、Chalk 和 Ora，命令参数由 Commander 管理。直接输入子命令也可使用向导：
+
+```sh
+# 选择文件、快照时间、批次大小和高级参数
+bun run cli sync-archive
+# 选择处理数量，再逐个审核候选
+bun run cli resolve-alias-misses
+# 查看某个子命令的参数
+bun run cli sync-archive --help
+```
+
+显式传入的参数优先，不重复询问。Archive 自动读取文件旁的 `.meta.json`，缺少快照时间才提示输入；不会用当前时间代替源数据时间。每批导入结束后可以选择继续下一批，复用本次参数和已保存的检查点。
+
+| 选项                 | 作用                                                            |
+| -------------------- | --------------------------------------------------------------- |
+| `--json`             | 将结果写为 stdout JSON；仍可使用交互菜单，提示和进度写到 stderr |
+| `--no-interactive`   | 禁止向导和下一批确认，缺少必要参数时直接报错，适合定时任务      |
+| `--log-file <路径>`  | 追加保存完整、脱敏的 JSONL 调试日志，自动创建父目录             |
+| `--log-level <级别>` | 控制终端日志详细程度，不影响日志文件                            |
+
+普通终端默认显示中文结果摘要。stdout 重定向时自动输出 JSON；交互连续执行多批时，每批输出一行 JSON，即 JSONL。stdin / stderr 非终端或处于 CI 时自动关闭菜单和动画，日志降级为 JSONL；不带子命令时显示帮助。`NO_COLOR` 可关闭颜色。`--json` 与 `--no-interactive` 相互独立，建议脚本同时指定：
+
+```sh
+bun run cli sync-archive --file data/subject.jsonlines --as-of 2026-10-20T08:18:54Z --limit 1000 --json --no-interactive --log-file data/logs/import.jsonl
+```
+
+`resolve-alias-misses` 始终需要明确选择，不接受 `--no-interactive`；仍支持从 stdin 管道按行输入序号、`-1`、`0` 或 `q`，不会自动选择首个候选。其他既有命令和参数继续可用；`migrate` 的旧脚本文本输出保留，显式使用 `--json` 时返回 JSON。
+
+Ctrl+C 取消时退出码为 `130`。Archive 会等待当前写入结束，再保存已完成行的检查点；若检查点保存失败，仍按错误退出（退出码 `1`），可根据日志从上次检查点续跑。别名审核保留已确认完成的结果；下载或导出取消可能留下 `.partial` 文件，需要检查后再重试。
+
 ## 数据同步
 
 ### 单条目更新
@@ -340,7 +381,7 @@ bun run cli sync-archive --file data/subject.jsonlines --dry-run --skip-invalid 
 
 `--dry-run` 不连接本地数据库或远程 API，不读取或更新同步检查点，也不创建或追加 `.errors.jsonl`；即使带有 `--api-url`、`--request-delay-ms` 和 `--request-retries`，也不会发送请求或等待。因此不会推进下一批实际导入的位置。无效项默认终止解析，添加 `--skip-invalid` 后跳过并记录到 stderr 日志。
 
-stdout 输出 JSON 汇总：`dryRun=true`、`parsed`（成功解析的动画条数）、`ignored`（非动画）、`skipped`（无效项）、`emptyLines`（空行）、`line`（当前文件行号）、`complete` 和 `status`。`imported` 始终为 `0`，`errorLog` 为 `null`。统计按行计数，相同条目 ID 的重复行会分别计数；只有完整扫描且没有跳过项时，`status` 才为 `complete`。
+终端显示统计摘要；使用 `--json` 或重定向 stdout 可获得 JSON 汇总：`dryRun=true`、`parsed`（成功解析的动画条数）、`ignored`（非动画）、`skipped`（无效项）、`emptyLines`（空行）、`line`（当前文件行号）、`complete` 和 `status`。`imported` 始终为 `0`，`errorLog` 为 `null`。统计按行计数，相同条目 ID 的重复行会分别计数；只有完整扫描且没有跳过项时，`status` 才为 `complete`。
 
 ### 同步到远程 Worker 或 Node 服务
 
@@ -380,27 +421,30 @@ Archive 和单条目更新可用系统定时任务、CI 等周期执行以上 CL
 
 ### CLI 运行日志
 
-默认以 `info` 级别向 **stderr** 输出 JSON Lines 日志，包含时间、命令、事件、中文说明和累计耗时。**stdout 保持原有命令结果**，可继续供脚本解析或重定向保存。
+默认以 `info` 级别展示日志：交互终端在 **stderr** 显示阶段、计数、速度、检查点和关键提示；非终端 / CI 在 stderr 输出 JSONL，包含时间、命令、事件、中文说明和累计耗时。`--json` 或 stdout 重定向时，stdout 仅输出命令结果，不混入界面。
 
 - 启动、存储目标就绪、完成及失败均有日志；长任务每 5 秒报告当前阶段。
 - Archive 导入会报告文件校验、检查点恢复和保存、当前文件行号、条目 ID、成功数、无效跳过数、非动画忽略数、累计跳过数及导入速度。计数和速度针对本次执行，`checkpointLine` 是最近一次成功保存的检查点行号。
 - 备份报告校验、分页导出及恢复进度；下载报告已接收字节数、解压和文件校验阶段；calendar 每轮报告导入和 platform 补全结果。
 - 失败会记录当前阶段、进度与错误原因链；远程请求失败还记录 HTTP 状态码（如已收到响应）、耗时、Cloudflare Ray ID 和服务端 `X-Request-ID`（如有）。Archive 远程请求重试另有 `api_request_retry` 日志，调整日志级别不影响重试和续跑规则。
 
-`--log-level` 支持 `debug`、`info`（默认）、`warn`、`error` 和 `silent`。`debug` 额外记录逐条导入、API 请求开始和结束、请求间隔等待；`silent` 关闭 CLI 日志，失败仍返回非零退出码。Node 自身的运行时警告不受此参数控制。
+`--log-level` 支持 `debug`、`info`（默认）、`warn`、`error` 和 `silent`。`debug` 额外展示逐条导入、API 请求开始和结束、请求间隔等待；`silent` 关闭终端日志和进度，仍显示必要的交互提示与结果，失败返回非零退出码。`--log-file` 始终追加完整 debug 事件及其字段，不受终端日志级别影响，便于事后排查。Node 自身的运行时警告不受此参数控制，也不包含在该日志文件中。
 
 ```sh
 # 详细查看每条导入和请求状态
 bun run cli sync-archive --file data/subject.jsonlines --api-url https://your-api.example.com --as-of 2026-10-20T08:18:54Z --request-delay-ms 1000 --log-level debug
 
 # PowerShell：结果与日志分别保存
-bun run cli sync-archive --file data/subject.jsonlines --as-of 2026-10-20T08:18:54Z 1>result.json 2>sync.log
+bun run cli sync-archive --file data/subject.jsonlines --as-of 2026-10-20T08:18:54Z --no-interactive 1>result.json 2>sync.log
+
+# 保持交互界面，同时保存完整调试日志
+bun run cli sync-archive --log-file data/logs/import.jsonl
 
 # 只保留命令结果
 bun run cli stats --log-level silent
 ```
 
-日志不记录请求头和请求正文；已配置的 `ADMIN_TOKEN`、`BANGUMI_ACCESS_TOKEN` 和错误文本中的 Bearer 凭证会脱敏。无需在 Cloudflare 配置日志参数，这些选项只影响本机 CLI。
+日志不记录请求头和请求正文；已配置的 `ADMIN_TOKEN`、`BANGUMI_ACCESS_TOKEN`、PostgreSQL 连接串和错误文本中的 Bearer 凭证会脱敏。日志可能包含文件路径、条目名称和未命中别名。无需在 Cloudflare 配置日志参数，这些选项只影响本机 CLI。
 
 ### calendar 日历导入与定时更新
 
@@ -544,11 +588,11 @@ bun run cli resolve-alias-misses --api-url https://your-api.example.com --reques
 | `--request-delay-ms` | `0`    | 远程管理请求之间的间隔，单位毫秒                                   |
 | `--request-retries`  | `3`    | 远程管理请求失败后的重试次数，0 关闭                               |
 
-- 输入 `1`、`2` 等候选序号：立即获取所选条目的完整详情和评分，导入目标数据库，然后把本次未命中名称添加为**手动别名**。同一批中多次选中同一条目，只同步一次详情，各别名分别保存。即使只有一个候选也需要选择。
-- 输入 `-1`：立即把当前原始未命中名称标为无计划，继续处理下一个；再次运行命令时不再查询这些记录。
-- 没有搜索结果时，可输入自定义名称再次搜索，最多 300 个字符；若仍无结果可继续换名称，也可输入 `-1` 或 `0`。搜索成功并选中候选后，绑定的始终是**最初的未命中名称**，自定义搜索词不作为新增别名；不占用额外的 `--limit` 名额，候选上限仍使用 `--search-limit`。
-- 输入 `0`、`s` 或回车：跳过当前名称，保留处理计划；输入 `q`、Ctrl+C 或结束输入：停止后续选择，已保存的数据保留。跳过与未处理的记录下次仍会被查询。以上控制输入在无候选时同样有效。
-- 候选与提示输出到 stderr，stdout 输出 JSON 汇总及 `results` 中的别名、处理状态和所选条目 ID；标为无计划的结果为 `unplanned`，汇总包含同名计数；无候选时跳过记为 `no_candidates`。`--log-level silent` 仍保留交互提示。等待输入时暂停进度心跳，避免打断选择。重定向 stdin 时，每行作为一次明确选择，EOF 停止，不自动选第一项。
+- 交互终端用方向键选择作品，回车确认后立即获取完整详情和评分、导入目标数据库，并把本次未命中名称添加为**手动别名**。同一批中多次选中同一条目，只同步一次详情，各别名分别保存。即使只有一个候选也需要选择。
+- 菜单提供“换个名称搜索”“暂时跳过”“标为无计划”“结束本批”。有候选时同样可以换词，最多 300 个字符；绑定的始终是**最初的未命中名称**，自定义搜索词不作为新增别名，也不占用额外的 `--limit` 名额。
+- 标为无计划后立即保存状态并进入下一个名称，后续运行不再查询该记录；跳过会保留处理计划。结束本批或 Ctrl+C 保留此前已保存的数据，跳过与未处理的记录下次仍会被查询。
+- 管道 / 非终端保留行式交互：`1`、`2` 等选择候选序号，`-1` 标为无计划，`0`、`s` 或空行跳过，`q` 或 EOF 结束。无候选时还可以直接输入新的搜索名称。
+- 候选与提示输出到 stderr，终端显示中文汇总；使用 `--json` 或重定向 stdout 获得 JSON 汇总及 `results` 中的别名、处理状态和所选条目 ID。标为无计划的结果为 `unplanned`，无候选时跳过记为 `no_candidates`。`--log-level silent` 仍保留交互提示，等待输入时暂停进度心跳。
 - 远程模式由服务端使用 `BANGUMI_USER_AGENT` 和可选的 `BANGUMI_ACCESS_TOKEN` 完成搜索和详情获取；Worker Token 仍使用 Secret。本机无需 Bangumi Token。直接连接数据库时使用本机同名配置。
 - 远程服务需先完成 schema 第 3 版迁移，并更新到支持计划筛选与修改的版本。受管理员鉴权保护的 `POST /api/v1/admin/subjects/search` 正文为 `{"keyword":"动画别名","limit":10}`，返回 `{"total":2,"candidates":[...]}`。此接口只搜索；导入继续使用已有的单条目同步和手动别名接口。
 - 搜索或写入失败会停止命令并输出当前别名、已完成数量及所选条目 ID。条目同步与手动别名添加是两次操作；若同步已完成但添加别名失败，可用 `bun run cli alias-add --id 所选ID --name "别名"` 补全（远程目标追加相同的 `--api-url`）。成功绑定的名称会自动从未命中列表清理，再次运行处理剩余记录。

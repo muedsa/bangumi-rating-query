@@ -24,6 +24,7 @@ import { QueryService } from '../src/core/query-service.ts';
 import { postgresTestDatabase } from './helpers/postgres.ts';
 import './postgres.ts';
 import './migrations.ts';
+import './cli-ui.ts';
 
 const token = 'integration-test-token-with-32-characters';
 const migration = MIGRATIONS.map((file) => readFileSync(`migrations/${file}`, 'utf8')).join('\n');

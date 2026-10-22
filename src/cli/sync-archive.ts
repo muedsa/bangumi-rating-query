@@ -5,6 +5,7 @@ import { fromArchive } from '../adapters/bangumi/parse.ts';
 import type { ImportRecord } from '../core/models.ts';
 import { archiveLines, sha256File } from './archive.ts';
 import type { createCliLogger } from './logger.ts';
+import { checkCancelled } from './cancellation.ts';
 
 interface ArchiveTarget {
   getState(key: string): Promise<string | null>;
@@ -20,9 +21,11 @@ type Options = {
   skipInvalid: boolean;
   requestDelayMs?: number;
   logger: ReturnType<typeof createCliLogger>;
+  signal?: AbortSignal;
 } & ({ dryRun: true; target?: never } | { dryRun?: false; target: ArchiveTarget });
 
 export async function syncArchive(options: Options) {
+  checkCancelled(options.signal);
   const { file, logger, dryRun = false } = options;
   const target = options.target;
   const meta = existsSync(`${file}.meta.json`)
@@ -55,7 +58,7 @@ export async function syncArchive(options: Options) {
       file,
       asOf: new Date(asOf).toISOString(),
     });
-    key = `archive:${await sha256File(file)}:${asOf}`;
+    key = `archive:${await sha256File(file, options.signal)}:${asOf}`;
     logger.update({ phase: 'checkpoint_read', file });
     state = JSON.parse((await target.getState(key)) ?? '{"line":0}') as typeof state;
   }
@@ -68,6 +71,7 @@ export async function syncArchive(options: Options) {
   let ignored = 0;
   let emptyLines = 0;
   let limited = false;
+  let stopped = false;
   let checkpointLine = dryRun ? null : state.line;
   const startedAt = performance.now();
   const progress = (phase: string, subjectId?: number) => ({
@@ -122,6 +126,11 @@ export async function syncArchive(options: Options) {
     logger.update(progress('archive_scan'));
   }
   for await (const line of archiveLines(file)) {
+    // 在下一行开始前停止；已完成的当前写入包含在最后保存的检查点中。
+    if (options.signal?.aborted) {
+      stopped = true;
+      break;
+    }
     lineNumber++;
     logger.update(progress('archive_scan'));
     if (lineNumber <= state.line) continue;
@@ -210,13 +219,23 @@ export async function syncArchive(options: Options) {
     }
     if (lineNumber % checkpointInterval === 0) await saveCheckpoint();
   }
-  await saveCheckpoint(!limited);
-  const status = limited ? 'in_progress' : skippedTotal > 0 ? 'partial' : 'complete';
+  if (options.signal?.aborted) stopped = true;
+  // 取消可能发生在跳过历史行期间，不能把既有检查点倒退。
+  if (stopped) lineNumber = Math.max(lineNumber, state.line);
+  const complete = !limited && !stopped;
+  await saveCheckpoint(complete);
+  const status = stopped
+    ? 'stopped'
+    : limited
+      ? 'in_progress'
+      : skippedTotal > 0
+        ? 'partial'
+        : 'complete';
   logger.log(
     'info',
     dryRun ? 'archive_dry_run_completed' : 'archive_completed',
-    limited ? '已达到本次处理上限' : 'Archive 文件扫描完成',
-    { ...progress('finished'), complete: !limited, status },
+    stopped ? '已停止，已完成进度保留' : limited ? '已达到本次处理上限' : 'Archive 文件扫描完成',
+    { ...progress('finished'), complete, status },
   );
   return {
     ...(dryRun ? { dryRun: true, parsed, ignored, emptyLines } : {}),
@@ -224,7 +243,7 @@ export async function syncArchive(options: Options) {
     skipped,
     skippedTotal,
     line: lineNumber,
-    complete: !limited,
+    complete,
     status,
     errorLog: !dryRun && skippedTotal > 0 ? errorLog : null,
   };

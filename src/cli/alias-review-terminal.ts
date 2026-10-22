@@ -1,19 +1,13 @@
 import { createInterface } from 'node:readline';
-import { stripVTControlCharacters } from 'node:util';
 import type { Readable, Writable } from 'node:stream';
 import type { AliasReviewUI } from './resolve-alias-misses.ts';
 import { nameSchema } from '../core/models.ts';
-
-function display(value: string) {
-  return stripVTControlCharacters(value)
-    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, ' ')
-    .replace(/\s+/gu, ' ')
-    .trim();
-}
+import { display } from './display.ts';
 
 export function createAliasReviewTerminal(
   input: Readable = process.stdin,
   output: Writable = process.stderr,
+  signal?: AbortSignal,
 ) {
   const lines = createInterface({
     input,
@@ -25,10 +19,13 @@ export function createAliasReviewTerminal(
   const answers = lines[Symbol.asyncIterator]();
   let cancelled = false;
   let waiting = false;
-  lines.on('SIGINT', () => {
+  const cancel = () => {
     cancelled = true;
     lines.close();
-  });
+  };
+  lines.on('SIGINT', cancel);
+  signal?.addEventListener('abort', cancel, { once: true });
+  if (signal?.aborted) cancel();
   const write = (message: string) => {
     output.write(display(message) + '\n');
   };
@@ -86,6 +83,7 @@ export function createAliasReviewTerminal(
       return waiting;
     },
     close() {
+      signal?.removeEventListener('abort', cancel);
       lines.close();
     },
   };

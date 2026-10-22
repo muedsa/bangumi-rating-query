@@ -31,10 +31,14 @@
   },
   "dependencies": {
     "@bgm38/wiki": "^0.3.3",
+    "@clack/prompts": "^1.8.1",
     "@hono/node-server": "^2.1.5",
+    "chalk": "^6.0.1",
+    "commander": "^15.0.0",
     "drizzle-orm": "^0.45.4",
     "fflate": "^0.8.3",
     "hono": "^4.13.13",
+    "ora": "^9.4.1",
     "postgres": "^3.4.9",
     "zod": "^4.6.7"
   },

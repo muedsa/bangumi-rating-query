@@ -1,6 +1,26 @@
 import { expect, test } from 'bun:test';
 import { createCliLogger, errorDetails } from '../../src/cli/logger.ts';
 
+test('文件记录完整调试日志，终端按级别过滤，进度和文件共用脱敏', () => {
+  const consoleLines: string[] = [];
+  const fileLines: string[] = [];
+  const updates: unknown[] = [];
+  const logger = createCliLogger({
+    command: 'test',
+    level: 'info',
+    secrets: ['private-token'],
+    write: (line) => consoleLines.push(line),
+    writeFile: (line) => fileLines.push(line),
+    onUpdate: (data) => updates.push(data),
+  });
+  logger.log('debug', 'request', 'private-token');
+  logger.update({ phase: 'alias_search', keyword: 'private-token' });
+  expect(consoleLines).toEqual([]);
+  expect(fileLines).toHaveLength(1);
+  expect(fileLines[0]).not.toContain('private-token');
+  expect(updates).toEqual([{ phase: 'alias_search', keyword: '[REDACTED]' }]);
+});
+
 test('CLI 日志过滤级别，记录时间、阶段和最新进度', () => {
   const lines: string[] = [];
   let time = Date.parse('2026-10-20T00:00:00Z');

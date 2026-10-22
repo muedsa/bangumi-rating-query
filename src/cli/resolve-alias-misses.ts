@@ -32,6 +32,7 @@ export async function resolveAliasMisses(options: {
   logger: ReturnType<typeof createCliLogger>;
   limit?: number;
   searchLimit?: number;
+  signal?: AbortSignal;
 }) {
   const { limit, searchLimit } = aliasReviewOptionsSchema.parse(options);
   const { target, ui, logger } = options;
@@ -45,9 +46,13 @@ export async function resolveAliasMisses(options: {
   const synced = new Set<number>();
   let stopped = false;
   ui.write(
-    `本批处理 ${misses.length} 个有计划的未命中别名，每个最多 ${searchLimit} 个候选。输入候选序号后立即导入，-1 标为无计划，0/回车跳过，q 退出。`,
+    `本批处理 ${misses.length} 个有计划的未命中别名，每个最多 ${searchLimit} 个候选；选中作品后立即导入。`,
   );
   for (const [index, miss] of misses.entries()) {
+    if (options.signal?.aborted) {
+      stopped = true;
+      break;
+    }
     const name = nameSchema.parse(miss.name);
     const context = { index: index + 1, total: misses.length, name, completed: results.length };
     let selected: AliasReviewChoice | undefined;
@@ -59,10 +64,13 @@ export async function resolveAliasMisses(options: {
         logger.update({ phase: 'alias_search', ...searchContext });
         logger.log('info', 'alias_search_started', '搜索未命中别名的候选条目', searchContext);
         result = await target.searchSubjects(keyword, searchLimit);
+        if (options.signal?.aborted) {
+          selected = 'quit';
+          break;
+        }
         logger.update({ phase: 'alias_selection', ...searchContext });
         selected = await ui.choose(miss, result, index + 1, misses.length);
         if (typeof selected !== 'object') break;
-        if (result.candidates.length) throw new Error('仅在没有候选时支持自定义搜索名称');
         keyword = nameSchema.parse(selected.search);
         ui.write(`重新搜索：${keyword}（待处理别名：${name}）`);
       }

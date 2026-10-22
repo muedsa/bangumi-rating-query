@@ -30,6 +30,8 @@ export function createCliLogger(options: {
   level: LogVerbosity;
   secrets?: string[];
   write?: (line: string) => void;
+  writeFile?: (line: string) => void;
+  onUpdate?: (details: LogDetails) => void;
   now?: () => number;
 }) {
   const now = options.now ?? Date.now;
@@ -37,34 +39,35 @@ export function createCliLogger(options: {
   const write = options.write ?? ((line: string) => console.error(line));
   const secrets = [...(options.secrets ?? [])].filter(Boolean).sort((a, b) => b.length - a.length);
   let context: LogDetails = { phase: 'initializing' };
+  const serialize = (value: unknown) =>
+    JSON.stringify(value, (_key, value: unknown) => {
+      if (typeof value !== 'string') return value;
+      let safe = value.replace(/Bearer\s+[^\s"'<>]+/giu, 'Bearer [REDACTED]');
+      for (const secret of secrets) safe = safe.replaceAll(secret, '[REDACTED]');
+      return safe.replace(/\bpostgres(?:ql)?:\/\/[^\s"'<>]+/giu, '[URL_REDACTED]');
+    });
   const log: LogWriter = (level, event, message, details = {}) => {
-    if (priorities[level] < priorities[options.level]) return;
+    const visible = priorities[level] >= priorities[options.level];
+    if (!visible && !options.writeFile) return;
     const time = now();
-    write(
-      JSON.stringify(
-        {
-          ...details,
-          time: new Date(time).toISOString(),
-          level,
-          command: options.command,
-          event,
-          message,
-          elapsedMs: time - startedAt,
-        },
-        (_key, value: unknown) => {
-          if (typeof value !== 'string') return value;
-          let safe = value.replace(/Bearer\s+[^\s"'<>]+/giu, 'Bearer [REDACTED]');
-          for (const secret of secrets) safe = safe.replaceAll(secret, '[REDACTED]');
-          safe = safe.replace(/\bpostgres(?:ql)?:\/\/[^\s"'<>]+/giu, '[URL_REDACTED]');
-          return safe;
-        },
-      ),
-    );
+    const line = serialize({
+      ...details,
+      time: new Date(time).toISOString(),
+      level,
+      command: options.command,
+      event,
+      message,
+      elapsedMs: time - startedAt,
+    });
+    options.writeFile?.(line);
+    if (visible) write(line);
   };
   return {
     log,
     update(details: LogDetails) {
       context = details;
+      if (options.onUpdate && priorities[options.level] <= priorities.info)
+        options.onUpdate(JSON.parse(serialize(details)) as LogDetails);
     },
     progress() {
       log('info', 'cli_progress', '任务运行中', context);
