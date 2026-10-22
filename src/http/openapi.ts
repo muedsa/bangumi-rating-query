@@ -53,6 +53,14 @@ export const batchResponseSchema = z.object({
   ),
 });
 const anyObject = z.record(z.string(), z.unknown());
+const aliasMiss = z.object({
+  name: z.string(),
+  normalizedName: z.string(),
+  missCount: z.number().int().positive(),
+  firstMissedAt: z.number().int(),
+  lastMissedAt: z.number().int(),
+  planned: z.boolean(),
+});
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } };
 const aliasParam = { name: 'aliasId', in: 'path', required: true, schema: { type: 'string' } };
 function json(schema: z.ZodType) {
@@ -194,20 +202,27 @@ export function getOpenApi(maxBatchSize: number) {
       },
       '/api/v1/admin/stats/alias-misses': {
         get: operation(
-          '未知别名的累计未命中次数，按次数降序最多 100 条',
+          '未知别名的累计未命中次数，可按处理计划筛选后按次数降序取最多 100 条',
           z.object({
             enabled: z.boolean(),
-            aliases: z.array(
-              z.object({
-                name: z.string(),
-                normalizedName: z.string(),
-                missCount: z.number().int().positive(),
-                firstMissedAt: z.number().int(),
-                lastMissedAt: z.number().int(),
-              }),
-            ),
+            aliases: z.array(aliasMiss),
           }),
-          { admin: true },
+          {
+            admin: true,
+            parameters: [
+              {
+                name: 'planned',
+                in: 'query',
+                description: 'true 仅有计划，false 仅无计划；省略时返回全部状态',
+                schema: { type: 'boolean' },
+              },
+            ],
+          },
+        ),
+        patch: operation(
+          '按归一化名称修改未命中记录的处理计划；不存在时返回 404',
+          z.object({ alias: aliasMiss }),
+          { admin: true, body: z.object({ name: nameSchema, planned: z.boolean() }) },
         ),
       },
       '/api/v1/admin/stats/prune': {

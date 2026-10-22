@@ -208,9 +208,21 @@ export function createApp(
   app.get('/api/v1/admin/stats', async (c) =>
     c.json({ enabled: config.STATS_ENABLED, subjects: await repo.stats() }),
   );
-  app.get('/api/v1/admin/stats/alias-misses', async (c) =>
-    c.json({ enabled: config.ALIAS_MISS_STATS_ENABLED, aliases: await repo.aliasMissStats() }),
-  );
+  app.get('/api/v1/admin/stats/alias-misses', async (c) => {
+    const planned = z.enum(['true', 'false']).optional().parse(c.req.query('planned'));
+    return c.json({
+      enabled: config.ALIAS_MISS_STATS_ENABLED,
+      aliases: await repo.aliasMissStats(planned === undefined ? undefined : planned === 'true'),
+    });
+  });
+  app.patch('/api/v1/admin/stats/alias-misses', async (c) => {
+    const { name, planned } = z
+      .object({ name: nameSchema, planned: z.boolean() })
+      .parse(await c.req.json());
+    const alias = await repo.setAliasMissPlanned(name, planned);
+    if (!alias) throw new AppError(404, 'ALIAS_MISS_NOT_FOUND', '未命中别名记录不存在');
+    return c.json({ alias });
+  });
   app.post('/api/v1/admin/stats/prune', async (c) => {
     const { days } = z
       .object({ days: z.number().int().min(30).max(3650).default(90) })

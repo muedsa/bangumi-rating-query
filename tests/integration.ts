@@ -13,6 +13,7 @@ import { serve } from '@hono/node-server';
 import { zipSync, strToU8 } from 'fflate';
 import { SqliteDriver } from '../src/adapters/storage/sqlite.ts';
 import { SqlRepository } from '../src/adapters/storage/repository.ts';
+import { MIGRATIONS, SCHEMA_VERSION } from '../src/adapters/storage/schema.ts';
 import { createApp } from '../src/http/app.ts';
 import { readConfig } from '../src/config.ts';
 import { extractSubjects } from '../src/cli/archive.ts';
@@ -25,9 +26,7 @@ import './postgres.ts';
 import './migrations.ts';
 
 const token = 'integration-test-token-with-32-characters';
-const migration = ['0001_initial.sql', '0002_alias_miss_stats.sql']
-  .map((file) => readFileSync(`migrations/${file}`, 'utf8'))
-  .join('\n');
+const migration = MIGRATIONS.map((file) => readFileSync(`migrations/${file}`, 'utf8')).join('\n');
 const asOf = Date.parse('2026-01-01T00:00:00Z');
 
 test('Archive dry-run 默认全量统计，不请求 API、不创建数据库或错误文件', async () => {
@@ -752,6 +751,83 @@ for (const kind of ['node', 'postgres'] as const)
   });
 
 for (const kind of ['node', 'worker', 'postgres'] as const)
+  test(`${kind}: 未命中计划默认开启，可筛选及恢复，重复未命中不重置计划，补充别名仍清理`, async () => {
+    const target = await runtime(kind, false, undefined, true);
+    const path = '/api/v1/admin/stats/alias-misses';
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const patch = (body: unknown) =>
+      target.fetch(path, { method: 'PATCH', headers, body: JSON.stringify(body) });
+    const stats = async (query = '') => {
+      const response = await target.fetch(path + query, { headers });
+      assert.equal(response.status, 200);
+      return ((await response.json()) as any).aliases as any[];
+    };
+    const miss = () =>
+      target.fetch('/api/v1/ratings/batch', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ items: [{ inputId: 'a', names: ['Unknown'] }] }),
+      });
+    try {
+      assert.equal((await miss()).status, 200);
+      const original = (await stats())[0];
+      assert.equal(original.planned, true);
+      assert.equal((await target.fetch(path, { method: 'PATCH', body: '{}' })).status, 401);
+      for (const body of [
+        { name: 'unknown' },
+        { name: 'unknown', planned: 'false' },
+        { name: '', planned: false },
+      ])
+        assert.equal((await patch(body)).status, 400);
+      assert.equal((await target.fetch(path + '?planned=0', { headers })).status, 400);
+      const marked = await patch({ name: ' ＵＮＫＮＯＷＮ ', planned: false });
+      assert.equal(marked.status, 200);
+      assert.deepEqual(((await marked.json()) as any).alias, { ...original, planned: false });
+      assert.equal((await patch({ name: 'unknown', planned: false })).status, 200);
+      assert.deepEqual(await stats('?planned=true'), []);
+      assert.equal((await stats('?planned=false'))[0].planned, false);
+      assert.equal((await miss()).status, 200);
+      const repeated = (await stats())[0];
+      assert.equal(repeated.missCount, 2);
+      assert.equal(repeated.planned, false);
+      assert.equal(repeated.firstMissedAt, original.firstMissedAt);
+      assert.equal((await patch({ name: 'unknown', planned: true })).status, 200);
+      assert.equal((await stats('?planned=true'))[0].normalizedName, 'unknown');
+      const missing = await patch({ name: '不存在', planned: false });
+      assert.equal(missing.status, 404);
+      assert.equal(((await missing.json()) as any).error.code, 'ALIAS_MISS_NOT_FOUND');
+      assert.equal((await stats()).length, 1);
+      // 大量热门无计划名称不能挤占有计划列表的 LIMIT。
+      await target.sql(`WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<101)
+        INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at,planned)
+        SELECT '无计划'||n,'无计划'||n,1000,1,1,0 FROM nums`);
+      assert.equal((await stats()).length, 100);
+      assert((await stats()).every((r) => r.planned === false));
+      assert.deepEqual(
+        (await stats('?planned=true')).map((r) => r.normalizedName),
+        ['unknown'],
+      );
+      await patch({ name: 'unknown', planned: false });
+      const imported = await target.fetch('/api/v1/admin/import', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(fixture(1, '已导入', ['Unknown'])),
+      });
+      assert.equal(imported.status, 200);
+      assert.equal((await patch({ name: 'unknown', planned: true })).status, 404);
+      assert.deepEqual(
+        await target.sql("SELECT * FROM alias_miss_stats WHERE normalized_name='unknown'"),
+        [],
+      );
+      const spec = (await (await target.fetch('/openapi.json')).json()) as any;
+      assert.deepEqual(spec.paths[path].patch.security, [{ bearerAuth: [] }]);
+      assert(spec.paths[path].get.parameters.some((p: any) => p.name === 'planned'));
+    } finally {
+      await target.close();
+    }
+  });
+
+for (const kind of ['node', 'worker', 'postgres'] as const)
   for (const enabled of [false, true])
     test(`${kind}: 未命中别名统计开关 ${enabled}，归一化计数、管理鉴权及写入失败隔离`, async () => {
       const target = await runtime(kind, false, undefined, enabled);
@@ -847,7 +923,9 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
           assert.equal((await stats()).aliases.length, 2);
         } else {
           // 关闭开关只停止查询计数，补充别名仍应清理之前积累的记录。
-          await target.sql("INSERT INTO alias_miss_stats VALUES ('unknown','Unknown',2,1,2)");
+          await target.sql(
+            "INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at) VALUES ('unknown','Unknown',2,1,2)",
+          );
           const added = await target.fetch('/api/v1/admin/subjects/1/aliases', {
             method: 'POST',
             headers,
@@ -935,7 +1013,9 @@ for (const kind of ['node', 'worker', 'postgres'] as const) {
       const manual = await send('/api/v1/admin/subjects/11/aliases', { name: 'abc 别称' });
       assert(!(await remaining()).includes('abc 别称'));
       // 重复添加已存在的别名，也能清理旧版本遗留的统计。
-      await target.sql("INSERT INTO alias_miss_stats VALUES ('abc 别称','ABC 别称',2,1,2)");
+      await target.sql(
+        "INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at) VALUES ('abc 别称','ABC 别称',2,1,2)",
+      );
       const repeated = await send('/api/v1/admin/subjects/11/aliases', { name: 'abc 别称' });
       assert.equal(repeated.alias.id, manual.alias.id);
       assert(!(await remaining()).includes('abc 别称'));
@@ -976,7 +1056,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const) {
       assert.deepEqual(await remaining(), ['仍然未知', '恢复名', '过期导入', '日历跳过'].sort());
       // 清理参数同样要支持导入上限，避免超过 D1 每条语句 100 个参数的限制。
       await target.sql(`WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<200)
-        INSERT INTO alias_miss_stats SELECT '批量'||n,'批量'||n,1,1,1 FROM nums`);
+        INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at) SELECT '批量'||n,'批量'||n,1,1,1 FROM nums`);
       await send(
         '/api/v1/admin/import',
         fixture(
@@ -1696,7 +1776,7 @@ for (const databaseDriver of ['sqlite', 'postgres'] as const)
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), {
         status: 'ok',
-        schemaVersion: 2,
+        schemaVersion: SCHEMA_VERSION,
         statisticsEnabled: false,
       });
     } finally {
@@ -1853,19 +1933,18 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
             assert.deepEqual(body.filter, { type: [2] });
             assert.equal(body.sort, 'match');
             return Response.json({
-              total: body.keyword === '丙无结果' ? 0 : 2,
-              data:
-                body.keyword === '丙无结果'
-                  ? []
-                  : [801, 802].map((id) => ({
-                      id,
-                      type: 2,
-                      name: `候选${id}`,
-                      name_cn: `中文${id}`,
-                      date: '2026-01-01',
-                      platform: 'TV',
-                      rating: { score: 8, total: 10 },
-                    })),
+              total: ['甲别名', '丙无结果'].includes(body.keyword) ? 0 : 2,
+              data: ['甲别名', '丙无结果'].includes(body.keyword)
+                ? []
+                : [801, 802].map((id) => ({
+                    id,
+                    type: 2,
+                    name: `候选${id}`,
+                    name_cn: `中文${id}`,
+                    date: '2026-01-01',
+                    platform: 'TV',
+                    rating: { score: 8, total: 10 },
+                  })),
             });
           }
           assert.equal(url.pathname, '/v0/subjects/802');
@@ -1897,31 +1976,35 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       assert.equal(requests.length, 0);
       const names = ['甲别名', '乙别名', '丙无结果', '丁跳过', '戊退出', '己超出数量'];
       for (const [i, name] of names.entries())
-        await target.sql(`INSERT INTO alias_miss_stats VALUES ('${name}','${name}',${10 - i},1,1)`);
-      const run = promisify(execFile)(
-        process.execPath,
-        [
-          'dist/node/cli.js',
-          'resolve-alias-misses',
-          '--api-url',
-          target.baseUrl,
-          '--limit',
-          '5',
-          '--search-limit',
-          '2',
-          '--request-delay-ms',
-          '1',
-        ],
-        {
-          env: {
-            ...process.env,
-            ADMIN_TOKEN: token,
-            BANGUMI_USER_AGENT: '',
-            BANGUMI_ACCESS_TOKEN: 'unused-local-secret',
+        await target.sql(
+          `INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at) VALUES ('${name}','${name}',${10 - i},1,1)`,
+        );
+      const start = () =>
+        promisify(execFile)(
+          process.execPath,
+          [
+            'dist/node/cli.js',
+            'resolve-alias-misses',
+            '--api-url',
+            target.baseUrl,
+            '--limit',
+            '5',
+            '--search-limit',
+            '2',
+            '--request-delay-ms',
+            '1',
+          ],
+          {
+            env: {
+              ...process.env,
+              ADMIN_TOKEN: token,
+              BANGUMI_USER_AGENT: '',
+              BANGUMI_ACCESS_TOKEN: 'unused-local-secret',
+            },
           },
-        },
-      );
-      run.child.stdin!.end('invalid\n2\n2\n0\nq\n');
+        );
+      const run = start();
+      run.child.stdin!.end('自定义名称\ninvalid\n2\n2\n-1\n0\nq\n');
       const { stdout, stderr } = await run.catch((error) => {
         throw new Error(`交互 CLI 失败，服务端日志：${target.logs.join('\n')}`, { cause: error });
       });
@@ -1929,7 +2012,8 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       assert.equal(summary.status, 'stopped');
       assert.equal(summary.total, 5);
       assert.equal(summary.resolved, 2);
-      assert.equal(summary.noCandidates, 1);
+      assert.equal(summary.noCandidates, 0);
+      assert.equal(summary.unplanned, 1);
       assert.equal(summary.skipped, 1);
       assert.equal(summary.remaining, 1);
       assert.equal(summary.importedSubjects, 1);
@@ -1939,7 +2023,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       assert(!stdout.includes('unused-local-secret'));
       assert.deepEqual(
         requests.filter((r) => r.path === '/v0/search/subjects').map((r) => r.body.keyword),
-        names.slice(0, 5),
+        [names[0], '自定义名称', ...names.slice(1, 5)],
       );
       assert.equal(requests.filter((r) => r.path === '/v0/subjects/802').length, 1);
       const aliases = await target.sql(
@@ -1959,6 +2043,21 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       assert.equal(
         (await target.sql('SELECT score FROM ratings_current WHERE subject_id=802'))[0]!.score,
         8.6,
+      );
+      assert.equal(
+        (
+          await target.sql("SELECT planned FROM alias_miss_stats WHERE normalized_name='丙无结果'")
+        )[0]!.planned,
+        0,
+      );
+      requests.length = 0;
+      const next = start();
+      next.child.stdin!.end('0\n0\n0\n');
+      const nextSummary = JSON.parse((await next).stdout);
+      assert.equal(nextSummary.total, 3);
+      assert.deepEqual(
+        requests.map((r) => r.body.keyword),
+        names.slice(3),
       );
       fail = true;
       const failed = await target.fetch('/api/v1/admin/subjects/search', {
@@ -1981,14 +2080,22 @@ test('Node CLI 本地交互处理使用本机 Bangumi Token，输入结束保留
     mock,
     `globalThis.fetch = async (url, init) => {
     if (new Headers(init.headers).get('Authorization') !== 'Bearer local-search-secret') throw new Error('missing token');
-    if (String(url).includes('/v0/search/subjects?')) return Response.json({total:1,data:[{id:7,type:2,name:'本地作品'}]});
+    if (String(url).includes('/v0/search/subjects?')) {
+      const keyword = JSON.parse(init.body).keyword;
+      if (['甲','乙','换个名称'].includes(keyword)) return Response.json({total:0,data:[]});
+      if (keyword === '不再处理') throw new Error('unplanned should not be searched');
+      return Response.json({total:1,data:[{id:7,type:2,name:'本地作品'}]});
+    }
     if (String(url).endsWith('/v0/subjects/7')) return Response.json({id:7,type:2,name:'本地作品',rating:{score:7,total:5}});
     throw new Error('unexpected request');
   };`,
   );
   const seed = new SqliteDriver(database);
   seed.migrate();
-  seed.db.exec("INSERT INTO alias_miss_stats VALUES ('甲','甲',2,1,1),('乙','乙',1,1,1)");
+  seed.db.exec(
+    "INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at) VALUES ('甲','甲',3,1,1),('乙','乙',2,1,1),('丙','丙',1,1,1)",
+  );
+  seed.db.exec("INSERT INTO alias_miss_stats VALUES ('不再处理','不再处理',100,1,1,0)");
   seed.close();
   const env = {
     ...process.env,
@@ -1998,28 +2105,31 @@ test('Node CLI 本地交互处理使用本机 Bangumi Token，输入结束保留
     BANGUMI_USER_AGENT: 'test/local-search',
     BANGUMI_ACCESS_TOKEN: 'local-search-secret',
   };
-  const run = promisify(execFile)(
-    process.execPath,
-    [
-      '--import',
-      pathToFileURL(mock).href,
-      join(process.cwd(), 'dist/node/cli.js'),
-      'resolve-alias-misses',
-    ],
-    { env, cwd: dir },
-  );
-  run.child.stdin!.end('1\n');
+  const start = () =>
+    promisify(execFile)(
+      process.execPath,
+      [
+        '--import',
+        pathToFileURL(mock).href,
+        join(process.cwd(), 'dist/node/cli.js'),
+        'resolve-alias-misses',
+      ],
+      { env, cwd: dir },
+    );
+  const run = start();
+  run.child.stdin!.end('本地作品\n1\n换个名称\n-1\n');
   const { stdout } = await run;
   assert.equal(JSON.parse(stdout).resolved, 1);
+  assert.equal(JSON.parse(stdout).unplanned, 1);
   assert.equal(JSON.parse(stdout).status, 'stopped');
   const check = new SqliteDriver(database);
   try {
     assert.deepEqual(
       check.db
-        .prepare('SELECT normalized_name FROM alias_miss_stats')
+        .prepare('SELECT normalized_name FROM alias_miss_stats WHERE planned=1')
         .all()
         .map((r) => r.normalized_name),
-      ['乙'],
+      ['丙'],
     );
     assert.equal(
       check.db
@@ -2027,9 +2137,17 @@ test('Node CLI 本地交互处理使用本机 Bangumi Token，输入结束保留
         .get()!.n,
       1,
     );
+    assert.equal(
+      check.db.prepare("SELECT planned FROM alias_miss_stats WHERE normalized_name='乙'").get()!
+        .planned,
+      0,
+    );
   } finally {
     check.close();
   }
+  const next = start();
+  next.child.stdin!.end('0\n');
+  assert.equal(JSON.parse((await next).stdout).total, 1);
   const untouched = join(dir, 'untouched.sqlite');
   for (const args of [
     ['--limit', '0'],

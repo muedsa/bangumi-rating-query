@@ -9,18 +9,20 @@ export const aliasReviewOptionsSchema = z.object({
   searchLimit: z.coerce.number().int().min(1).max(MAX_SEARCH_CANDIDATES).default(10),
 });
 export interface AliasReviewTarget {
-  aliasMisses(): Promise<AliasMiss[]>;
+  aliasMisses(planned?: boolean): Promise<AliasMiss[]>;
+  setAliasMissPlanned(name: string, planned: boolean): Promise<AliasMiss>;
   searchSubjects(keyword: string, limit: number): Promise<SubjectSearchResult>;
   syncSubject(id: number): Promise<{ imported: number }>;
   alias(id: number, name: string): Promise<unknown>;
 }
+export type AliasReviewChoice = number | 'skip' | 'quit' | 'unplanned' | { search: string };
 export interface AliasReviewUI {
   choose(
     miss: AliasMiss,
     result: SubjectSearchResult,
     index: number,
     total: number,
-  ): Promise<number | 'skip' | 'quit'>;
+  ): Promise<AliasReviewChoice>;
   write(message: string): void;
 }
 
@@ -34,38 +36,50 @@ export async function resolveAliasMisses(options: {
   const { limit, searchLimit } = aliasReviewOptionsSchema.parse(options);
   const { target, ui, logger } = options;
   logger.update({ phase: 'alias_misses_loading', limit, searchLimit });
-  const misses = (await target.aliasMisses()).slice(0, limit);
+  const misses = (await target.aliasMisses(true)).slice(0, limit);
   const results: {
     name: string;
-    status: 'resolved' | 'skipped' | 'no_candidates';
+    status: 'resolved' | 'skipped' | 'no_candidates' | 'unplanned';
     subjectId?: number;
   }[] = [];
   const synced = new Set<number>();
   let stopped = false;
   ui.write(
-    `本批处理 ${misses.length} 个未命中别名，每个最多 ${searchLimit} 个候选。输入候选序号后立即导入，0/回车跳过，q 退出。`,
+    `本批处理 ${misses.length} 个有计划的未命中别名，每个最多 ${searchLimit} 个候选。输入候选序号后立即导入，-1 标为无计划，0/回车跳过，q 退出。`,
   );
   for (const [index, miss] of misses.entries()) {
     const name = nameSchema.parse(miss.name);
     const context = { index: index + 1, total: misses.length, name, completed: results.length };
-    logger.update({ phase: 'alias_search', ...context });
-    logger.log('info', 'alias_search_started', '搜索未命中别名的候选条目', context);
-    let selected: number | 'skip' | 'quit' | undefined;
+    let selected: AliasReviewChoice | undefined;
     try {
-      const result = await target.searchSubjects(name, searchLimit);
-      if (!result.candidates.length) {
-        ui.write(`[${index + 1}/${misses.length}] ${name}：没有搜索到动画候选，保留未命中记录。`);
-        results.push({ name, status: 'no_candidates' });
-        continue;
+      let keyword = name;
+      let result: SubjectSearchResult;
+      while (true) {
+        const searchContext = { ...context, keyword };
+        logger.update({ phase: 'alias_search', ...searchContext });
+        logger.log('info', 'alias_search_started', '搜索未命中别名的候选条目', searchContext);
+        result = await target.searchSubjects(keyword, searchLimit);
+        logger.update({ phase: 'alias_selection', ...searchContext });
+        selected = await ui.choose(miss, result, index + 1, misses.length);
+        if (typeof selected !== 'object') break;
+        if (result.candidates.length) throw new Error('仅在没有候选时支持自定义搜索名称');
+        keyword = nameSchema.parse(selected.search);
+        ui.write(`重新搜索：${keyword}（待处理别名：${name}）`);
       }
-      logger.update({ phase: 'alias_selection', ...context });
-      selected = await ui.choose(miss, result, index + 1, misses.length);
       if (selected === 'quit') {
         stopped = true;
         break;
       }
       if (selected === 'skip') {
-        results.push({ name, status: 'skipped' });
+        results.push({ name, status: result.candidates.length ? 'skipped' : 'no_candidates' });
+        continue;
+      }
+      if (selected === 'unplanned') {
+        logger.update({ phase: 'alias_plan_update', ...context });
+        await target.setAliasMissPlanned(name, false);
+        results.push({ name, status: 'unplanned' });
+        ui.write(`已标为无计划：${name}`);
+        logger.log('info', 'alias_unplanned', '未命中别名已标为无计划', context);
         continue;
       }
       const id = positiveId.parse(selected);
@@ -100,6 +114,7 @@ export async function resolveAliasMisses(options: {
     resolved: results.filter((r) => r.status === 'resolved').length,
     skipped: results.filter((r) => r.status === 'skipped').length,
     noCandidates: results.filter((r) => r.status === 'no_candidates').length,
+    unplanned: results.filter((r) => r.status === 'unplanned').length,
     remaining: misses.length - results.length,
     importedSubjects: synced.size,
     results,

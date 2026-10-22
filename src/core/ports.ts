@@ -9,6 +9,7 @@ export interface AliasMiss {
   missCount: number;
   firstMissedAt: number;
   lastMissedAt: number;
+  planned: boolean;
 }
 
 export interface SubjectSource {
@@ -48,7 +49,8 @@ export interface ApplicationRepository extends AnimeRepository {
   exportPage(after: number): Promise<BackupPage>;
   restoreRecord(record: BackupRecord): Promise<void>;
   stats(): Promise<Record<string, unknown>[]>;
-  aliasMissStats(): Promise<AliasMiss[]>;
+  aliasMissStats(planned?: boolean): Promise<AliasMiss[]>;
+  setAliasMissPlanned(name: string, planned: boolean): Promise<AliasMiss | null>;
   pruneDaily(days: number): Promise<{ deleted: number; hasMore: boolean }>;
   retentionPreview(
     days: number,

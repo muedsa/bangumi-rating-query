@@ -158,8 +158,15 @@ export function remoteTarget(base: string, token: string, options: RemoteTargetO
       await request('/restore', 'POST', record);
     },
     stats: () => request('/stats'),
-    aliasMisses: async () =>
-      (await request<{ aliases: AliasMiss[] }>('/stats/alias-misses')).aliases,
+    aliasMisses: async (planned?: boolean) =>
+      (
+        await request<{ aliases: AliasMiss[] }>(
+          `/stats/alias-misses${planned === undefined ? '' : `?planned=${planned}`}`,
+        )
+      ).aliases,
+    setAliasMissPlanned: async (name: string, planned: boolean) =>
+      (await request<{ alias: AliasMiss }>('/stats/alias-misses', 'PATCH', { name, planned }))
+        .alias,
     prune: (days: number) => request('/stats/prune', 'POST', { days }),
     retention: (days: number, _enabled: boolean) => request(`/retention?days=${days}`),
     alias: (id: number, name: string) => request(`/subjects/${id}/aliases`, 'POST', { name }),

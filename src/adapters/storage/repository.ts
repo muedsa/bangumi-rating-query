@@ -29,6 +29,8 @@ const aliasColumns = sql`id, subject_id AS "subjectId", name, normalized_name AS
   source, created_at AS "createdAt", updated_at AS "updatedAt"`;
 const ratingColumns = sql`subject_id AS "subjectId", score, votes, rank, source,
   data_as_of AS "dataAsOf", fetched_at AS "fetchedAt"`;
+const aliasMissColumns = sql`name, normalized_name AS "normalizedName", miss_count AS "missCount",
+  first_missed_at AS "firstMissedAt", last_missed_at AS "lastMissedAt", planned`;
 
 export class SqlRepository implements ApplicationRepository {
   readonly dialect: StorageDialect;
@@ -270,11 +272,17 @@ export class SqlRepository implements ApplicationRepository {
         first_missed_at=CASE WHEN excluded.first_missed_at < alias_miss_stats.first_missed_at THEN excluded.first_missed_at ELSE alias_miss_stats.first_missed_at END,
         last_missed_at=CASE WHEN excluded.last_missed_at > alias_miss_stats.last_missed_at THEN excluded.last_missed_at ELSE alias_miss_stats.last_missed_at END`);
   }
-  aliasMissStats() {
-    return this
-      .query<AliasMiss>(sql`SELECT name, normalized_name AS "normalizedName", miss_count AS "missCount",
-      first_missed_at AS "firstMissedAt", last_missed_at AS "lastMissedAt" FROM alias_miss_stats
+  async aliasMissStats(planned?: boolean) {
+    const rows = await this.query<AliasMiss>(sql`SELECT ${aliasMissColumns} FROM alias_miss_stats
+      ${planned === undefined ? sql`` : sql`WHERE planned=${Number(planned)}`}
       ORDER BY miss_count DESC, last_missed_at DESC, normalized_name LIMIT 100`);
+    return rows.map((row) => ({ ...row, planned: Boolean(row.planned) }));
+  }
+  async setAliasMissPlanned(name: string, planned: boolean) {
+    const rows = await this
+      .query<AliasMiss>(sql`UPDATE alias_miss_stats SET planned=${Number(planned)}
+      WHERE normalized_name=${normalizeName(name)} RETURNING ${aliasMissColumns}`);
+    return rows[0] ? { ...rows[0], planned: Boolean(rows[0].planned) } : null;
   }
   async setState(key: string, value: string) {
     await this

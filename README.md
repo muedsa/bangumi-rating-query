@@ -488,10 +488,10 @@ bun run cli stats-prune --days 90
 - 按与查询相同的 NFKC、大小写和空白归一化规则汇总，同一 HTTP 请求中同一归一化名称只增加一次，不同请求（包括重试）分别计数。
 - 多名称查询中，即使其他名称命中，也会记录其中未知的名称。显式 `subjectId` 查询附带的名称不参与此统计，Bangumi 条目链接也不统计；纯数字作品名仍按名称统计。
 - 已知别名因为年份、平台筛选或歧义而没有唯一结果时不算未知；已匹配条目缺少评分也不算未知。
-- 保存归一化名称、最近一次未命中的名称写法、累计次数、首次及最后未命中时间（Unix 毫秒），不保存 IP、User-Agent 或 inputId。
+- 保存归一化名称、最近一次未命中的名称写法、累计次数、首次及最后未命中时间（Unix 毫秒）和处理计划 `planned`，不保存 IP、User-Agent 或 inputId。新记录和升级前的旧记录默认有计划（`true`）；标为无计划后，重复未命中仍累计次数，但不会自动恢复计划。
 - 写入失败时保留评分查询结果，并记录 `alias_miss_write_failed`，日志不附带查询原文。
 - 导入、日历同步、手动新增或修改别名、备份恢复成功后，按归一化名称自动删除对应未命中记录，包含自动补全的季数别名。清理与别名写入在同一事务中完成；未实际写入的别名不会误删统计。
-- 清理不受统计开关影响：关闭开关后补充别名，仍会移除对应的历史记录；其他未命中记录保留。此改动无需额外数据库迁移。
+- 清理不受统计开关或处理计划影响：关闭开关后补充别名，仍会移除对应的历史记录，无计划的记录同样清理；其他未命中记录保留。
 
 管理员可查看次数最多的 100 条，依次按未命中次数、最后未命中时间降序排列：
 
@@ -500,20 +500,32 @@ GET /api/v1/admin/stats/alias-misses
 Authorization: Bearer <ADMIN_TOKEN>
 ```
 
-响应为 `{ "enabled": true, "aliases": [{ "name": "未知名称", "normalizedName": "未知名称", "missCount": 3, "firstMissedAt": 1792540800000, "lastMissedAt": 1792540860000 }] }`。关闭开关后仍可查看已有统计。CLI 同样支持本地数据库和远程服务：
+响应为 `{ "enabled": true, "aliases": [{ "name": "未知名称", "normalizedName": "未知名称", "missCount": 3, "firstMissedAt": 1792540800000, "lastMissedAt": 1792540860000, "planned": true }] }`。默认包含全部计划状态，可用 `?planned=true` 仅查询有计划记录，`?planned=false` 仅查询无计划记录；先筛选，再按次数取前 100 条。关闭统计开关后仍可查看、修改已有记录。CLI 同样支持本地数据库和远程服务（`alias-misses` 查看全部计划状态）：
 
 ```sh
 bun run cli alias-misses
 bun run cli alias-misses --api-url https://your-worker.example.com
 ```
 
+修改处理计划使用同路径的 `PATCH` 请求，以名称归一化后定位记录：
+
+```http
+PATCH /api/v1/admin/stats/alias-misses
+Authorization: Bearer <ADMIN_TOKEN>
+Content-Type: application/json
+
+{"name":"未知名称","planned":false}
+```
+
+返回 `{ "alias": { ...完整未命中记录 } }`；记录不存在时返回 404，不创建新统计。将 `planned` 设为 `true` 可恢复处理计划。
+
 Node/CLI 使用 `.env`，修改后重启；Docker Compose 透传同名变量。Worker 在 `wrangler.jsonc` 的 `vars.ALIAS_MISS_STATS_ENABLED` 中配置，重新部署生效。
 
-本次增加 schema 第 2 版：Node/CLI 启动时自动按顺序迁移 SQLite/PostgreSQL，旧条目、别名和统计保留。Worker 部署前先执行 `bunx wrangler d1 migrations apply DB --remote`（本地使用 `--local`），再部署新版本。未命中统计没有对应条目，属于环境统计数据，不包含在现有按条目导出的业务备份中；`stats-prune` 仍只清理每日访问统计。
+当前 schema 第 3 版：`0002_alias_miss_stats.sql` 创建统计表，`0003_alias_miss_planned.sql` 增加默认有计划的 `planned` 字段及筛选索引。Node/CLI 启动时自动按顺序迁移 SQLite/PostgreSQL，旧条目、别名和统计保留。Worker 部署前先执行 `bunx wrangler d1 migrations apply DB --remote`（本地使用 `--local`），再部署新版本。未命中统计和处理计划没有对应条目，属于环境统计数据，不包含在现有按条目导出的业务备份中；`stats-prune` 仍只清理每日访问统计。
 
 ### 交互处理未命中别名
 
-`resolve-alias-misses` 按未命中次数顺序取一批名称，使用 Bangumi 的 [`POST /v0/search/subjects`](https://github.com/bangumi/api/blob/master/open-api/v0.yaml) 搜索动画（`filter.type=[2]`，`sort=match`）。每次显示候选的原名、中文名、日期、作品形式、评分、简介和条目链接，由用户确认对应关系。
+`resolve-alias-misses` 仅从**有计划处理**的记录中按未命中次数顺序取一批名称，使用 Bangumi 的 [`POST /v0/search/subjects`](https://github.com/bangumi/api/blob/master/open-api/v0.yaml) 搜索动画（`filter.type=[2]`，`sort=match`）。每次显示候选的原名、中文名、日期、作品形式、评分、简介和条目链接，由用户确认对应关系。
 
 ```sh
 bun run build:node
@@ -533,10 +545,12 @@ bun run cli resolve-alias-misses --api-url https://your-api.example.com --reques
 | `--request-retries`  | `3`    | 远程管理请求失败后的重试次数，0 关闭                               |
 
 - 输入 `1`、`2` 等候选序号：立即获取所选条目的完整详情和评分，导入目标数据库，然后把本次未命中名称添加为**手动别名**。同一批中多次选中同一条目，只同步一次详情，各别名分别保存。即使只有一个候选也需要选择。
-- 输入 `0`、`s` 或回车：跳过当前名称；输入 `q`、Ctrl+C 或结束输入：停止后续选择，已保存的数据保留。没有搜索结果时自动跳过。跳过与未处理的记录继续保留在未命中列表。
-- 候选与提示输出到 stderr，stdout 输出 JSON 汇总及 `results` 中的别名、处理状态和所选条目 ID；`--log-level silent` 仍保留交互提示。等待输入时暂停进度心跳，避免打断选择。重定向 stdin 时，每行作为一次明确选择，EOF 停止，不自动选第一项。
+- 输入 `-1`：立即把当前原始未命中名称标为无计划，继续处理下一个；再次运行命令时不再查询这些记录。
+- 没有搜索结果时，可输入自定义名称再次搜索，最多 300 个字符；若仍无结果可继续换名称，也可输入 `-1` 或 `0`。搜索成功并选中候选后，绑定的始终是**最初的未命中名称**，自定义搜索词不作为新增别名；不占用额外的 `--limit` 名额，候选上限仍使用 `--search-limit`。
+- 输入 `0`、`s` 或回车：跳过当前名称，保留处理计划；输入 `q`、Ctrl+C 或结束输入：停止后续选择，已保存的数据保留。跳过与未处理的记录下次仍会被查询。以上控制输入在无候选时同样有效。
+- 候选与提示输出到 stderr，stdout 输出 JSON 汇总及 `results` 中的别名、处理状态和所选条目 ID；标为无计划的结果为 `unplanned`，汇总包含同名计数；无候选时跳过记为 `no_candidates`。`--log-level silent` 仍保留交互提示。等待输入时暂停进度心跳，避免打断选择。重定向 stdin 时，每行作为一次明确选择，EOF 停止，不自动选第一项。
 - 远程模式由服务端使用 `BANGUMI_USER_AGENT` 和可选的 `BANGUMI_ACCESS_TOKEN` 完成搜索和详情获取；Worker Token 仍使用 Secret。本机无需 Bangumi Token。直接连接数据库时使用本机同名配置。
-- 远程服务需先更新到支持搜索的版本。新增受管理员鉴权保护的 `POST /api/v1/admin/subjects/search`，正文为 `{"keyword":"动画别名","limit":10}`，返回 `{"total":2,"candidates":[...]}`。此接口只搜索；导入继续使用已有的单条目同步和手动别名接口。此次功能不需要额外数据库迁移。
+- 远程服务需先完成 schema 第 3 版迁移，并更新到支持计划筛选与修改的版本。受管理员鉴权保护的 `POST /api/v1/admin/subjects/search` 正文为 `{"keyword":"动画别名","limit":10}`，返回 `{"total":2,"candidates":[...]}`。此接口只搜索；导入继续使用已有的单条目同步和手动别名接口。
 - 搜索或写入失败会停止命令并输出当前别名、已完成数量及所选条目 ID。条目同步与手动别名添加是两次操作；若同步已完成但添加别名失败，可用 `bun run cli alias-add --id 所选ID --name "别名"` 补全（远程目标追加相同的 `--api-url`）。成功绑定的名称会自动从未命中列表清理，再次运行处理剩余记录。
 
 ## 备份与迁移

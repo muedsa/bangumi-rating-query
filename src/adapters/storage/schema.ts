@@ -1,5 +1,9 @@
-export const SCHEMA_VERSION = 2;
-export const MIGRATIONS = ['0001_initial.sql', '0002_alias_miss_stats.sql'] as const;
+export const SCHEMA_VERSION = 3;
+export const MIGRATIONS = [
+  '0001_initial.sql',
+  '0002_alias_miss_stats.sql',
+  '0003_alias_miss_planned.sql',
+] as const;
 
 export function readSchemaVersion(rows: { version: unknown }[]) {
   if (rows.length !== 1 || !Number.isInteger(rows[0]?.version))
