@@ -3,6 +3,7 @@ import type { BackupRecord } from '../core/backup.ts';
 import type { CalendarSyncResult } from '../core/calendar.ts';
 import type { AliasMiss } from '../core/ports.ts';
 import type { LogWriter } from './logger.ts';
+import { subjectSearchResultSchema } from '../core/subject-search.ts';
 
 interface RemoteTargetOptions {
   requestDelayMs?: number;
@@ -138,6 +139,10 @@ export function remoteTarget(base: string, token: string, options: RemoteTargetO
   return {
     close() {},
     syncSubject: (id: number) => request<{ imported: number }>(`/subjects/${id}/sync`, 'POST'),
+    searchSubjects: async (keyword: string, limit: number) =>
+      subjectSearchResultSchema.parse(
+        await request('/subjects/search', 'POST', { keyword, limit }),
+      ),
     syncCalendar: () => request<CalendarSyncResult>('/calendar/sync', 'POST'),
     importRecord: async (record: ImportRecord) => {
       await request('/import', 'POST', record);

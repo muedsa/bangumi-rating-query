@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { pathToFileURL } from 'node:url';
 import { createServer } from 'node:http';
 import { Miniflare, Response as MiniflareResponse, convertV4MiniflareOptions } from 'miniflare';
 import { serve } from '@hono/node-server';
@@ -636,6 +637,7 @@ async function runtime(
       {
         subjectSource: source,
         calendarSource: source,
+        searchSource: source,
         writeErrorLog: (line) => logs.push(line),
       },
     );
@@ -686,6 +688,7 @@ async function runtime(
               const response = await bangumi.fetcher(request.url, {
                 method: request.method,
                 headers: Object.fromEntries(request.headers),
+                body: ['GET', 'HEAD'].includes(request.method) ? undefined : await request.text(),
               });
               return new MiniflareResponse(await response.arrayBuffer(), {
                 status: response.status,
@@ -1823,6 +1826,224 @@ test('Archive 跳过模式仍在数据库写入失败时停止，且不越过失
     check.close();
   }
   assert.equal(JSON.parse((await run()).stdout).imported, 1);
+});
+
+for (const kind of ['node', 'worker', 'postgres'] as const)
+  test(`${kind}: CLI 交互处理未命中别名使用服务端搜索与凭证，选中后导入并清理`, async () => {
+    const requests: { path: string; method?: string; body?: any }[] = [];
+    let fail = false;
+    const target = await runtime(
+      kind,
+      false,
+      {
+        userAgent: 'test/server-search',
+        accessToken: 'search-server-secret',
+        fetcher: (async (input, init) => {
+          const url = new URL(String(input));
+          const headers = new Headers(init?.headers);
+          assert.equal(headers.get('Authorization'), 'Bearer search-server-secret');
+          assert.equal(headers.get('User-Agent'), 'test/server-search');
+          const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+          requests.push({ path: url.pathname, method: init?.method, body });
+          if (fail) return new Response('', { status: 401 });
+          if (url.pathname === '/v0/search/subjects') {
+            assert.equal(init?.method, 'POST');
+            assert.equal(url.searchParams.get('limit'), '2');
+            assert.equal(url.searchParams.get('offset'), '0');
+            assert.deepEqual(body.filter, { type: [2] });
+            assert.equal(body.sort, 'match');
+            return Response.json({
+              total: body.keyword === '丙无结果' ? 0 : 2,
+              data:
+                body.keyword === '丙无结果'
+                  ? []
+                  : [801, 802].map((id) => ({
+                      id,
+                      type: 2,
+                      name: `候选${id}`,
+                      name_cn: `中文${id}`,
+                      date: '2026-01-01',
+                      platform: 'TV',
+                      rating: { score: 8, total: 10 },
+                    })),
+            });
+          }
+          assert.equal(url.pathname, '/v0/subjects/802');
+          return Response.json({
+            id: 802,
+            type: 2,
+            name: '选定条目',
+            platform: 'TV',
+            infobox: [{ key: '别名', value: '上游别名' }],
+            rating: { score: 8.6, total: 20, rank: 10 },
+          });
+        }) as typeof fetch,
+      },
+      true,
+    );
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    try {
+      const denied = await target.fetch('/api/v1/admin/subjects/search', {
+        method: 'POST',
+        body: '{}',
+      });
+      assert.equal(denied.status, 401);
+      const invalid = await target.fetch('/api/v1/admin/subjects/search', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ keyword: 'a', limit: 51 }),
+      });
+      assert.equal(invalid.status, 400);
+      assert.equal(requests.length, 0);
+      const names = ['甲别名', '乙别名', '丙无结果', '丁跳过', '戊退出', '己超出数量'];
+      for (const [i, name] of names.entries())
+        await target.sql(`INSERT INTO alias_miss_stats VALUES ('${name}','${name}',${10 - i},1,1)`);
+      const run = promisify(execFile)(
+        process.execPath,
+        [
+          'dist/node/cli.js',
+          'resolve-alias-misses',
+          '--api-url',
+          target.baseUrl,
+          '--limit',
+          '5',
+          '--search-limit',
+          '2',
+          '--request-delay-ms',
+          '1',
+        ],
+        {
+          env: {
+            ...process.env,
+            ADMIN_TOKEN: token,
+            BANGUMI_USER_AGENT: '',
+            BANGUMI_ACCESS_TOKEN: 'unused-local-secret',
+          },
+        },
+      );
+      run.child.stdin!.end('invalid\n2\n2\n0\nq\n');
+      const { stdout, stderr } = await run.catch((error) => {
+        throw new Error(`交互 CLI 失败，服务端日志：${target.logs.join('\n')}`, { cause: error });
+      });
+      const summary = JSON.parse(stdout);
+      assert.equal(summary.status, 'stopped');
+      assert.equal(summary.total, 5);
+      assert.equal(summary.resolved, 2);
+      assert.equal(summary.noCandidates, 1);
+      assert.equal(summary.skipped, 1);
+      assert.equal(summary.remaining, 1);
+      assert.equal(summary.importedSubjects, 1);
+      assert(stderr.includes('请输入 1～2'));
+      assert(stderr.includes('alias_resolved'));
+      assert(!stderr.includes('search-server-secret'));
+      assert(!stdout.includes('unused-local-secret'));
+      assert.deepEqual(
+        requests.filter((r) => r.path === '/v0/search/subjects').map((r) => r.body.keyword),
+        names.slice(0, 5),
+      );
+      assert.equal(requests.filter((r) => r.path === '/v0/subjects/802').length, 1);
+      const aliases = await target.sql(
+        "SELECT name FROM subject_aliases WHERE subject_id=802 AND source='manual'",
+      );
+      assert.deepEqual(aliases.map((r) => r.name).sort(), ['甲别名', '乙别名'].sort());
+      assert.deepEqual(
+        (await target.sql('SELECT normalized_name FROM alias_miss_stats'))
+          .map((r) => r.normalized_name)
+          .sort(),
+        names.slice(2).sort(),
+      );
+      assert.deepEqual(
+        (await target.sql('SELECT id FROM subjects')).map((r) => r.id),
+        [802],
+      );
+      assert.equal(
+        (await target.sql('SELECT score FROM ratings_current WHERE subject_id=802'))[0]!.score,
+        8.6,
+      );
+      fail = true;
+      const failed = await target.fetch('/api/v1/admin/subjects/search', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ keyword: 'failed', limit: 2 }),
+      });
+      assert.equal(failed.status, 503);
+      assert.equal(((await failed.json()) as any).error.code, 'BANGUMI_API_ERROR');
+    } finally {
+      await target.close();
+    }
+  });
+
+test('Node CLI 本地交互处理使用本机 Bangumi Token，输入结束保留未处理记录，非法数量不创建数据库', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bangumi-alias-review-'));
+  const database = join(dir, 'local.sqlite');
+  const mock = join(dir, 'mock.mjs');
+  await writeFile(
+    mock,
+    `globalThis.fetch = async (url, init) => {
+    if (new Headers(init.headers).get('Authorization') !== 'Bearer local-search-secret') throw new Error('missing token');
+    if (String(url).includes('/v0/search/subjects?')) return Response.json({total:1,data:[{id:7,type:2,name:'本地作品'}]});
+    if (String(url).endsWith('/v0/subjects/7')) return Response.json({id:7,type:2,name:'本地作品',rating:{score:7,total:5}});
+    throw new Error('unexpected request');
+  };`,
+  );
+  const seed = new SqliteDriver(database);
+  seed.migrate();
+  seed.db.exec("INSERT INTO alias_miss_stats VALUES ('甲','甲',2,1,1),('乙','乙',1,1,1)");
+  seed.close();
+  const env = {
+    ...process.env,
+    DATABASE_DRIVER: 'sqlite',
+    DATABASE_PATH: database,
+    ADMIN_TOKEN: '',
+    BANGUMI_USER_AGENT: 'test/local-search',
+    BANGUMI_ACCESS_TOKEN: 'local-search-secret',
+  };
+  const run = promisify(execFile)(
+    process.execPath,
+    [
+      '--import',
+      pathToFileURL(mock).href,
+      join(process.cwd(), 'dist/node/cli.js'),
+      'resolve-alias-misses',
+    ],
+    { env, cwd: dir },
+  );
+  run.child.stdin!.end('1\n');
+  const { stdout } = await run;
+  assert.equal(JSON.parse(stdout).resolved, 1);
+  assert.equal(JSON.parse(stdout).status, 'stopped');
+  const check = new SqliteDriver(database);
+  try {
+    assert.deepEqual(
+      check.db
+        .prepare('SELECT normalized_name FROM alias_miss_stats')
+        .all()
+        .map((r) => r.normalized_name),
+      ['乙'],
+    );
+    assert.equal(
+      check.db
+        .prepare("SELECT COUNT(*) AS n FROM subject_aliases WHERE name='甲' AND source='manual'")
+        .get()!.n,
+      1,
+    );
+  } finally {
+    check.close();
+  }
+  const untouched = join(dir, 'untouched.sqlite');
+  for (const args of [
+    ['--limit', '0'],
+    ['--limit', '101'],
+    ['--search-limit', '51'],
+  ])
+    await assert.rejects(
+      promisify(execFile)(
+        process.execPath,
+        [join(process.cwd(), 'dist/node/cli.js'), 'resolve-alias-misses', ...args],
+        { cwd: dir, env: { ...env, DATABASE_PATH: untouched } },
+      ),
+    );
+  assert(!existsSync(untouched));
 });
 
 for (const kind of ['node', 'worker', 'postgres'] as const)

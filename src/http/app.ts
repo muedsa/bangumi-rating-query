@@ -7,7 +7,13 @@ import { AppError, batchSchema, importSchema, nameSchema, positiveId } from '../
 import { QueryService } from '../core/query-service.ts';
 import { normalizeName } from '../core/matching.ts';
 import { seasonAliasNames } from '../core/season-aliases.ts';
-import type { ApplicationRepository, CalendarSource, SubjectSource } from '../core/ports.ts';
+import type {
+  ApplicationRepository,
+  CalendarSource,
+  SubjectSource,
+  SubjectSearchSource,
+} from '../core/ports.ts';
+import { searchSubjects, subjectSearchRequestSchema } from '../core/subject-search.ts';
 import { SubjectSyncService } from '../core/sync-service.ts';
 import { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import { backupSchema } from '../core/backup.ts';
@@ -22,6 +28,7 @@ export function createApp(
   dependencies: {
     subjectSource?: SubjectSource;
     calendarSource?: CalendarSource;
+    searchSource?: SubjectSearchSource;
     writeErrorLog?: (line: string) => void;
   } = {},
 ) {
@@ -135,6 +142,10 @@ export function createApp(
     await next();
   });
   const aliasBody = z.object({ name: nameSchema });
+  app.post('/api/v1/admin/subjects/search', async (c) => {
+    const { keyword, limit } = subjectSearchRequestSchema.parse(await c.req.json());
+    return c.json(await searchSubjects(dependencies.searchSource, keyword, limit));
+  });
   app.post('/api/v1/admin/calendar/sync', async (c) => c.json(await calendarSync.sync()));
   app.post('/api/v1/admin/subjects/:id/sync', async (c) => {
     const id = positiveId.parse(Number(c.req.param('id')));

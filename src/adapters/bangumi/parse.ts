@@ -2,6 +2,47 @@ import { parseToMap } from '@bgm38/wiki';
 import { z } from 'zod';
 import { importSchema, positiveId, type ImportRecord } from '../../core/models.ts';
 import { calendarSnapshotSchema, type CalendarSnapshot } from '../../core/calendar.ts';
+import {
+  subjectSearchResultSchema,
+  type SubjectSearchCandidate,
+} from '../../core/subject-search.ts';
+
+const searchItemSchema = z.object({
+  id: positiveId,
+  type: z.number().int(),
+  name: z.string(),
+  name_cn: z.string().default(''),
+  date: z.string().nullish(),
+  platform: z.string().default(''),
+  summary: z.string().default(''),
+  rating: z
+    .object({ score: z.number().min(0).max(10), total: z.number().int().nonnegative() })
+    .nullish(),
+});
+export function fromSearch(input: unknown, limit: number) {
+  const page = z
+    .object({ total: z.number().int().nonnegative(), data: z.array(searchItemSchema).max(1000) })
+    .parse(input);
+  const candidates = new Map<number, SubjectSearchCandidate>();
+  for (const raw of page.data) {
+    if (raw.type !== 2 || candidates.has(raw.id)) continue;
+    candidates.set(raw.id, {
+      id: raw.id,
+      name: raw.name,
+      nameCn: raw.name_cn,
+      airDate: validDate(raw.date),
+      platform: raw.platform,
+      summary: raw.summary.slice(0, 500),
+      score: raw.rating?.total ? raw.rating.score : null,
+      votes: raw.rating?.total ?? 0,
+    });
+    if (candidates.size >= limit) break;
+  }
+  return subjectSearchResultSchema.parse({
+    total: page.total,
+    candidates: [...candidates.values()],
+  });
+}
 
 export function wikiAliases(infobox: string): string[] {
   if (!infobox.trim()) return [];

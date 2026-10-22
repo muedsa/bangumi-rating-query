@@ -5,12 +5,14 @@ import { parseArgs } from 'node:util';
 import { z } from 'zod';
 import { readConfig } from '../config.ts';
 import { nameSchema, positiveId } from '../core/models.ts';
-import { BangumiClient, createBangumiSource } from '../adapters/bangumi/client.ts';
+import { createBangumiSource } from '../adapters/bangumi/client.ts';
 import { backupSchema } from '../core/backup.ts';
 import { archiveLines as lines, downloadArchive, sha256File } from '../cli/archive.ts';
 import { syncArchive } from '../cli/sync-archive.ts';
 import { localTarget, remoteTarget } from '../cli/target.ts';
 import { createCliLogger, type LogVerbosity } from '../cli/logger.ts';
+import { aliasReviewOptionsSchema, resolveAliasMisses } from '../cli/resolve-alias-misses.ts';
+import { createAliasReviewTerminal } from '../cli/alias-review-terminal.ts';
 
 if (existsSync('.env')) loadEnvFile('.env');
 const { values, positionals } = parseArgs({
@@ -22,6 +24,7 @@ const { values, positionals } = parseArgs({
     name: { type: 'string' },
     'api-url': { type: 'string' },
     limit: { type: 'string' },
+    'search-limit': { type: 'string' },
     'checkpoint-interval': { type: 'string' },
     days: { type: 'string', default: '90' },
     'skip-invalid': { type: 'boolean', default: false },
@@ -50,6 +53,7 @@ function makeLogger(level: LogVerbosity) {
 let logger = makeLogger('info');
 let heartbeat: ReturnType<typeof setInterval> | undefined;
 let running = false;
+let reviewTerminal: ReturnType<typeof createAliasReviewTerminal> | undefined;
 function required(value: string | undefined, label: string): string {
   if (!value) throw new Error(`需要 ${label}`);
   return value;
@@ -58,6 +62,9 @@ async function main() {
   if (!command || command === 'help') {
     console.log(
       '命令：migrate | download-archive --out 文件 | sync-archive --file 文件 [--as-of ISO时间] [--limit 1000] [--checkpoint-interval 20] [--skip-invalid] [--dry-run] [--request-retries 3] | sync-subject --id ID | sync-calendar [--complete-platforms] | alias-add --id ID --name 别名 | export --out 文件 | import --file 文件 | stats | alias-misses | stats-prune [--days 90] | retention-preview [--days 90]\n纯解析统计：sync-archive --dry-run，不连接存储、不更新检查点，默认扫描全文件，可不指定 --as-of。\nArchive 检查点间隔：--checkpoint-interval 正整数，默认 20，按文件行号触发；达到批次上限或正常结束时也保存，dry-run 不写入。\n远程 Worker / Node：追加 --api-url https://服务地址，并配置 ADMIN_TOKEN。\n远程请求间隔：--request-delay-ms 毫秒，默认 0（不延迟）。\nArchive 远程请求重试：--request-retries 次数，默认 3（首次请求之外最多重试 3 次），0 关闭；网络异常、超时和 HTTP 408/429/5xx 按 1、2、4 秒退避重试（上限 30 秒），遵循请求间隔和 Retry-After。\n日志：--log-level debug|info|warn|error|silent，默认 info；日志输出到 stderr，每 5 秒报告进度，stdout 保留命令结果。',
+    );
+    console.log(
+      '交互处理未命中别名：resolve-alias-misses [--limit 20] [--search-limit 10] [--request-retries 3]\n--limit：本批最多处理 1～100 个别名；--search-limit：每个别名最多展示 1～50 个候选。输入序号立即导入并添加手动别名，0/回车跳过，q 或输入结束停止。远程模式使用服务端 Bangumi 凭证；直接连接数据库使用本机凭证。提示输出到 stderr，stdout 输出 JSON 处理结果。',
     );
     return;
   }
@@ -68,10 +75,21 @@ async function main() {
   logger.log('info', 'cli_started', '开始执行命令', {
     mode: values['dry-run'] ? 'dry-run' : values['api-url'] ? 'remote' : 'local',
   });
-  heartbeat = setInterval(() => logger.progress(), 5000);
+  heartbeat = setInterval(() => {
+    if (!reviewTerminal?.waiting) logger.progress();
+  }, 5000);
   heartbeat.unref();
-  if (values['request-retries'] !== undefined && command !== 'sync-archive')
-    throw new Error('--request-retries 仅支持 sync-archive');
+  if (
+    values['request-retries'] !== undefined &&
+    !['sync-archive', 'resolve-alias-misses'].includes(command)
+  )
+    throw new Error('--request-retries 仅支持 sync-archive 或 resolve-alias-misses');
+  if (values['search-limit'] !== undefined && command !== 'resolve-alias-misses')
+    throw new Error('--search-limit 仅支持 resolve-alias-misses');
+  const reviewOptions =
+    command === 'resolve-alias-misses'
+      ? aliasReviewOptionsSchema.parse({ limit: values.limit, searchLimit: values['search-limit'] })
+      : undefined;
   if (values['checkpoint-interval'] !== undefined && command !== 'sync-archive')
     throw new Error('--checkpoint-interval 仅支持 sync-archive');
   if (values['dry-run']) {
@@ -111,7 +129,10 @@ async function main() {
     .number()
     .int()
     .min(0)
-    .parse(values['request-retries'] ?? (command === 'sync-archive' ? '3' : '0'));
+    .parse(
+      values['request-retries'] ??
+        (['sync-archive', 'resolve-alias-misses'].includes(command) ? '3' : '0'),
+    );
   logger.update({ phase: 'opening_storage' });
   const target = values['api-url']
     ? remoteTarget(values['api-url'], config.ADMIN_TOKEN, {
@@ -121,7 +142,9 @@ async function main() {
       })
     : await localTarget(
         process.env,
-        command === 'sync-calendar' ? createBangumiSource(config) : undefined,
+        ['sync-calendar', 'sync-subject', 'resolve-alias-misses'].includes(command)
+          ? createBangumiSource(config)
+          : undefined,
         config.CALENDAR_PLATFORM_BATCH_SIZE,
       );
   logger.log('info', 'target_ready', '存储目标已就绪', {
@@ -184,14 +207,18 @@ async function main() {
         const id = positiveId.parse(Number(values.id));
         logger.update({ phase: 'subject_sync', subjectId: id });
         logger.log('info', 'subject_sync_started', '开始同步条目', { subjectId: id });
-        if ('syncSubject' in target) console.log(JSON.stringify(await target.syncSubject(id)));
-        else {
-          const record = await new BangumiClient(config.BANGUMI_USER_AGENT, {
-            accessToken: config.BANGUMI_ACCESS_TOKEN,
-          }).getSubject(id);
-          await target.importRecord(record);
-          console.log(JSON.stringify({ imported: id }));
-        }
+        console.log(JSON.stringify(await target.syncSubject(id)));
+        break;
+      }
+      case 'resolve-alias-misses': {
+        reviewTerminal = createAliasReviewTerminal();
+        console.log(
+          JSON.stringify(
+            await resolveAliasMisses({ target, ui: reviewTerminal, logger, ...reviewOptions }),
+            null,
+            2,
+          ),
+        );
         break;
       }
       case 'alias-add':
@@ -299,6 +326,7 @@ async function main() {
         throw new Error(`未知命令：${command}`);
     }
   } finally {
+    reviewTerminal?.close();
     await target.close();
   }
 }

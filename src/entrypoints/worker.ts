@@ -33,6 +33,7 @@ export default {
         cachedApp = createApp(new SqlRepository(new D1Driver(env.DB)), config, {
           subjectSource: source,
           calendarSource: source,
+          searchSource: source,
         });
         cachedEnv = env;
       }

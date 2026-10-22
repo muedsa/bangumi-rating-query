@@ -1,5 +1,6 @@
-import { fromApi, fromApiPlatform, fromCalendar } from './parse.ts';
-import type { CalendarSource, SubjectSource } from '../../core/ports.ts';
+import { fromApi, fromApiPlatform, fromCalendar, fromSearch } from './parse.ts';
+import type { CalendarSource, SubjectSource, SubjectSearchSource } from '../../core/ports.ts';
+import { subjectSearchRequestSchema } from '../../core/subject-search.ts';
 
 interface BangumiClientOptions {
   accessToken?: string;
@@ -7,7 +8,7 @@ interface BangumiClientOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-export class BangumiClient implements SubjectSource, CalendarSource {
+export class BangumiClient implements SubjectSource, CalendarSource, SubjectSearchSource {
   private readonly accessToken: string;
   private readonly fetcher: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -22,7 +23,20 @@ export class BangumiClient implements SubjectSource, CalendarSource {
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   }
   async getSubject(id: number) {
-    return fromApi(await this.request(`/v0/subjects/${id}`));
+    const record = fromApi(await this.request(`/v0/subjects/${id}`));
+    if (record.subject.id !== id) throw new Error('Bangumi 详情条目 ID 与请求不一致');
+    return record;
+  }
+  async searchSubjects(keyword: string, limit: number) {
+    const request = subjectSearchRequestSchema.parse({ keyword, limit });
+    return fromSearch(
+      await this.request(`/v0/search/subjects?limit=${request.limit}&offset=0`, {
+        keyword: request.keyword,
+        sort: 'match',
+        filter: { type: [2] },
+      }),
+      request.limit,
+    );
   }
   async getCalendar() {
     return fromCalendar(await this.request('/calendar'));
@@ -30,14 +44,18 @@ export class BangumiClient implements SubjectSource, CalendarSource {
   async getSubjectPlatform(id: number) {
     return fromApiPlatform(await this.request(`/v0/subjects/${id}`), id);
   }
-  private async request(path: string): Promise<unknown> {
+  private async request(path: string, body?: unknown): Promise<unknown> {
     // Workers 的全局 fetch 不能以客户端实例作为 this 调用。
     const fetcher = this.fetcher;
     for (let attempt = 0; attempt < 3; attempt++) {
       const headers = new Headers({ 'User-Agent': this.userAgent, Accept: 'application/json' });
       if (this.accessToken) headers.set('Authorization', `Bearer ${this.accessToken}`);
+      if (body !== undefined) headers.set('Content-Type', 'application/json');
       const response = await fetcher(`https://api.bgm.tv${path}`, {
         headers,
+        ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }),
+        // Worker 不支持 redirect=error；不跟随跳转，并在下方按非成功状态拒绝。
+        redirect: 'manual',
         signal: AbortSignal.timeout(15000),
       });
       if (response.ok) return await response.json();

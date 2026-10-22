@@ -1,6 +1,7 @@
 import type { Alias, ImportRecord, Rating, Subject } from './models.ts';
 import type { BackupPage, BackupRecord } from './backup.ts';
 import type { CalendarSnapshot } from './calendar.ts';
+import type { SubjectSearchResult } from './subject-search.ts';
 
 export interface AliasMiss {
   name: string;
@@ -12,6 +13,10 @@ export interface AliasMiss {
 
 export interface SubjectSource {
   getSubject(id: number): Promise<ImportRecord>;
+}
+
+export interface SubjectSearchSource {
+  searchSubjects(keyword: string, limit: number): Promise<SubjectSearchResult>;
 }
 
 export interface CalendarSource {

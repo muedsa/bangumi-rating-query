@@ -23,7 +23,11 @@ const driver = await openStorage(process.env).catch((error) => {
 });
 const repo = new SqlRepository(driver);
 const source = createBangumiSource(config);
-const app = createApp(repo, config, { subjectSource: source, calendarSource: source });
+const app = createApp(repo, config, {
+  subjectSource: source,
+  calendarSource: source,
+  searchSource: source,
+});
 const stopCalendar = config.CALENDAR_SYNC_ENABLED
   ? startCalendarSchedule(
       new CalendarSyncService(repo, source, config.CALENDAR_PLATFORM_BATCH_SIZE),

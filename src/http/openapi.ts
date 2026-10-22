@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { aliasSchema, batchSchema, importSchema, nameSchema } from '../core/models.ts';
 import { backupSchema } from '../core/backup.ts';
 import { calendarSyncResultSchema } from '../core/calendar.ts';
+import { subjectSearchRequestSchema, subjectSearchResultSchema } from '../core/subject-search.ts';
 
 const errorSchema = z.object({
   error: z.object({
@@ -133,6 +134,16 @@ export function getOpenApi(maxBatchSize: number) {
           '使用服务端 Bangumi 凭证更新一条动画；需配置 BANGUMI_USER_AGENT',
           z.object({ imported: z.number().int() }),
           { admin: true, parameters: [idParam] },
+        ),
+      },
+      '/api/v1/admin/subjects/search': {
+        post: operation(
+          '使用服务端 Bangumi 凭证按匹配度搜索动画候选，不导入数据',
+          subjectSearchResultSchema,
+          {
+            admin: true,
+            body: subjectSearchRequestSchema,
+          },
         ),
       },
       '/api/v1/admin/calendar/sync': {
