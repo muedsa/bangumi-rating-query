@@ -268,6 +268,8 @@ bun run cli alias-add --id 100 --name 我的别名
 
 ## CLI 交互与脚本模式
 
+文件选择支持相对路径、绝对路径和 Tab 补全。Windows 下可输入 `data/subject.jsonlines` 或 `data\subject.jsonlines`，也支持混合斜杠及 UNC 路径；Linux、macOS 使用 `/` 分隔目录，文件名中的反斜杠会保留。
+
 构建后，不带子命令即可打开主菜单：
 
 ```sh

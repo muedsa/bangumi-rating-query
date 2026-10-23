@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,6 +16,7 @@ const cleanEnv = {
   ADMIN_TOKEN: '',
   CI: '',
   NO_COLOR: '1',
+  TERM: 'xterm-256color',
   FORCE_COLOR: undefined,
 };
 async function setup() {
@@ -66,7 +67,7 @@ async function terminal(
   env: Record<string, string | undefined>,
   directory: string,
   mock: string,
-  steps: { prompt: string; input: string }[],
+  steps: { prompt: string; input: string | string[] }[],
 ) {
   const child = spawn(process.execPath, ['--import', pathToFileURL(mock).href, cli, ...args], {
     cwd: directory,
@@ -98,9 +99,14 @@ async function terminal(
           index++;
           since = '';
           // 让提示完成渲染并安装监听器，再发送本次按键。
-          setTimeout(() => {
-            if (!child.stdin.destroyed) child.stdin.write(step.input);
-          }, 30);
+          const chunks = Array.isArray(step.input) ? step.input : [step.input];
+          let next = 0;
+          const writeNext = () => {
+            if (child.stdin.destroyed) return;
+            child.stdin.write(chunks[next++]!);
+            if (next < chunks.length) setTimeout(writeNext, 30);
+          };
+          setTimeout(writeNext, 30);
         }
       });
       child.on('close', (code) => {
@@ -169,6 +175,58 @@ test('Clack 主菜单可查看统计并返回菜单，Ctrl+C 退出且不把界�
   assert(result.stderr.includes('暂无访问统计'));
   assert(result.stderr.includes('已取消'));
   assert(!/\u001b\[[\d;]*m/u.test(result.stderr));
+});
+
+test('Clack 文件选择默认正斜杠路径可直接确认', async () => {
+  const { dir, database, mock } = await setup();
+  await mkdir(join(dir, 'data'));
+  await writeFile(
+    join(dir, 'data', 'subject.jsonlines'),
+    JSON.stringify({ id: 1, type: 2, name: '路径测试' }),
+  );
+  const result = await terminal(
+    ['sync-archive', '--dry-run', '--json', '--limit', '1', '--skip-invalid'],
+    { ...cleanEnv, DATABASE_PATH: database },
+    dir,
+    mock,
+    [{ prompt: '选择 subject.jsonlines', input: '\r' }],
+  );
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).parsed, 1);
+  assert(!result.stderr.includes('No matches found'));
+});
+
+test('Clack 文件选择可输入带空格的相对或绝对路径，并用 Tab 补全后导入', async () => {
+  const { dir, database, mock } = await setup();
+  await mkdir(join(dir, 'data'));
+  await mkdir(join(dir, 'data space'));
+  await writeFile(
+    join(dir, 'data', 'subject.jsonlines'),
+    JSON.stringify({ id: 1, type: 2, name: '默认文件' }),
+  );
+  const selected = join(dir, 'data space', 'subject.jsonlines');
+  await writeFile(
+    selected,
+    [2, 3].map((id) => JSON.stringify({ id, type: 2, name: `选中文件${id}` })).join('\n'),
+  );
+  const inputs = [
+    './data space/subject.jso',
+    (process.platform === 'win32' ? selected.replaceAll('\\', '/') : selected).slice(0, -5),
+    ...(process.platform === 'win32'
+      ? ['data space\\subject.jso', '.\\data space/subject.jso']
+      : []),
+  ];
+  for (const input of inputs) {
+    const result = await terminal(
+      ['sync-archive', '--dry-run', '--json', '--limit', '10', '--skip-invalid'],
+      { ...cleanEnv, DATABASE_PATH: database },
+      dir,
+      mock,
+      [{ prompt: '选择 subject.jsonlines', input: ['\u0015', input, '\t', '\r'] }],
+    );
+    assert.equal(result.code, 0, `${input}\n${result.stderr}`);
+    assert.equal(JSON.parse(result.stdout).parsed, 2, input);
+  }
 });
 
 test('Clack 下一批复用参数和检查点，JSON 重定向始终为独立结果', async () => {

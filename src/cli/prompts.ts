@@ -2,6 +2,7 @@ import * as clack from '@clack/prompts';
 import type { Presentation } from './presentation.ts';
 import { CliCancelled } from './cancellation.ts';
 import { display } from './display.ts';
+import { fileSuggestions } from './file-path.ts';
 
 export interface Choice<T> {
   value: T;
@@ -77,12 +78,23 @@ export function createPrompts(presentation: Presentation, controller: AbortContr
       ),
     file: (question) =>
       ask<string>((signal) =>
-        clack.path({
+        clack.autocomplete<string>({
           ...common,
           signal,
-          ...question,
-          initialValue: question.defaultValue,
-          validate: (value) => question.validate?.(value ?? ''),
+          message: question.message,
+          initialUserInput: question.defaultValue ?? process.cwd(),
+          completeOnTab: true,
+          maxItems: 5,
+          options() {
+            return fileSuggestions(this.userInput).map((value) => ({
+              value,
+              label: display(value),
+            }));
+          },
+          // 候选已按平台路径规则匹配，不能再用原始输入做字符串过滤。
+          filter: () => true,
+          validate: (value) =>
+            typeof value !== 'string' || !value ? '请选择一个文件' : question.validate?.(value),
         }),
       ),
     confirm: (message, initialValue = false) =>
