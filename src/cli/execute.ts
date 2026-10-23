@@ -28,12 +28,14 @@ export function validateCommandOptions(command: CommandName, values: CliValues) 
     throw new Error('--request-retries 仅支持 sync-archive 或 resolve-alias-misses');
   if (values.searchLimit !== undefined && command !== 'resolve-alias-misses')
     throw new Error('--search-limit 仅支持 resolve-alias-misses');
+  if (values.auto && command !== 'resolve-alias-misses')
+    throw new Error('--auto 仅支持 resolve-alias-misses');
   if (values.checkpointInterval !== undefined && command !== 'sync-archive')
     throw new Error('--checkpoint-interval 仅支持 sync-archive');
   if (values.dryRun && command !== 'sync-archive') throw new Error('--dry-run 仅支持 sync-archive');
-  if (command === 'resolve-alias-misses' && values.interactive === false)
+  if (command === 'resolve-alias-misses' && values.interactive === false && !values.auto)
     throw new Error(
-      'resolve-alias-misses 需要逐项选择，请移除 --no-interactive；管道可继续输入序号、-1、0 或 q',
+      'resolve-alias-misses 需要逐项选择，请移除 --no-interactive 或使用 --auto 自动匹配；管道可继续输入序号、-1、0 或 q',
     );
 }
 export async function executeCommand(
@@ -50,9 +52,7 @@ export async function executeCommand(
   validateCommandOptions(command, values);
   checkCancelled(signal);
   const reviewOptions =
-    command === 'resolve-alias-misses'
-      ? aliasReviewOptionsSchema.parse({ limit: values.limit, searchLimit: values.searchLimit })
-      : undefined;
+    command === 'resolve-alias-misses' ? aliasReviewOptionsSchema.parse(values) : undefined;
   if (['sync-archive', 'import'].includes(command)) required(values.file, '--file');
   if (['download-archive', 'export'].includes(command)) required(values.out, '--out');
   if (['sync-subject', 'alias-add'].includes(command))
@@ -159,7 +159,7 @@ export async function executeCommand(
         return await target.syncSubject(id);
       }
       case 'resolve-alias-misses':
-        review = dependencies.createReview();
+        if (!reviewOptions?.auto) review = dependencies.createReview();
         return await resolveAliasMisses({ target, ui: review, logger, ...reviewOptions, signal });
       case 'alias-add':
         return await target.alias(

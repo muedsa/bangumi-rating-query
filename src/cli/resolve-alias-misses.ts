@@ -7,6 +7,7 @@ import type { createCliLogger } from './logger.ts';
 export const aliasReviewOptionsSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   searchLimit: z.coerce.number().int().min(1).max(MAX_SEARCH_CANDIDATES).default(10),
+  auto: z.boolean().default(false),
 });
 export interface AliasReviewTarget {
   aliasMisses(planned?: boolean): Promise<AliasMiss[]>;
@@ -28,24 +29,27 @@ export interface AliasReviewUI {
 
 export async function resolveAliasMisses(options: {
   target: AliasReviewTarget;
-  ui: AliasReviewUI;
+  ui?: AliasReviewUI;
   logger: ReturnType<typeof createCliLogger>;
   limit?: number;
   searchLimit?: number;
+  auto?: boolean;
   signal?: AbortSignal;
 }) {
-  const { limit, searchLimit } = aliasReviewOptionsSchema.parse(options);
+  const { limit, searchLimit, auto } = aliasReviewOptionsSchema.parse(options);
   const { target, ui, logger } = options;
-  logger.update({ phase: 'alias_misses_loading', limit, searchLimit });
+  if (!auto && !ui) throw new Error('人工处理未命中别名需要交互界面');
+  logger.update({ phase: 'alias_misses_loading', limit, searchLimit, auto });
   const misses = (await target.aliasMisses(true)).slice(0, limit);
   const results: {
     name: string;
     status: 'resolved' | 'skipped' | 'no_candidates' | 'unplanned';
     subjectId?: number;
+    reason?: 'no_candidates' | 'no_exact_match' | 'ambiguous_exact_match';
   }[] = [];
   const synced = new Set<number>();
   let stopped = false;
-  ui.write(
+  ui?.write(
     `本批处理 ${misses.length} 个有计划的未命中别名，每个最多 ${searchLimit} 个候选；选中作品后立即导入。`,
   );
   for (const [index, miss] of misses.entries()) {
@@ -56,6 +60,7 @@ export async function resolveAliasMisses(options: {
     const name = nameSchema.parse(miss.name);
     const context = { index: index + 1, total: misses.length, name, completed: results.length };
     let selected: AliasReviewChoice | undefined;
+    let skipReason: (typeof results)[number]['reason'];
     try {
       let keyword = name;
       let result: SubjectSearchResult;
@@ -68,25 +73,70 @@ export async function resolveAliasMisses(options: {
           selected = 'quit';
           break;
         }
+        if (auto) {
+          // 精确比较原名和中文名，不使用检索归一化；多个不同条目同名时留给人工确认。
+          const ids = [
+            ...new Set(
+              result.candidates
+                .filter((candidate) => candidate.name === name || candidate.nameCn === name)
+                .map((candidate) => candidate.id),
+            ),
+          ];
+          if (ids.length === 1) {
+            selected = ids[0]!;
+            logger.log(
+              'info',
+              'alias_auto_selected',
+              `自动选择：${name} → https://bgm.tv/subject/${selected}`,
+              {
+                ...context,
+                subjectId: selected,
+              },
+            );
+          } else {
+            selected = 'skip';
+            skipReason = !result.candidates.length
+              ? 'no_candidates'
+              : ids.length
+                ? 'ambiguous_exact_match'
+                : 'no_exact_match';
+            const reason = !result.candidates.length
+              ? '没有搜索结果'
+              : ids.length
+                ? '多个条目完全同名'
+                : '没有完全同名的候选';
+            logger.log('info', 'alias_auto_skipped', `自动跳过：${name}（${reason}）`, {
+              ...context,
+              reason: skipReason,
+              candidateCount: result.candidates.length,
+              exactSubjectIds: ids,
+            });
+          }
+          break;
+        }
         logger.update({ phase: 'alias_selection', ...searchContext });
-        selected = await ui.choose(miss, result, index + 1, misses.length);
+        selected = await ui!.choose(miss, result, index + 1, misses.length);
         if (typeof selected !== 'object') break;
         keyword = nameSchema.parse(selected.search);
-        ui.write(`重新搜索：${keyword}（待处理别名：${name}）`);
+        ui!.write(`重新搜索：${keyword}（待处理别名：${name}）`);
       }
       if (selected === 'quit') {
         stopped = true;
         break;
       }
       if (selected === 'skip') {
-        results.push({ name, status: result.candidates.length ? 'skipped' : 'no_candidates' });
+        results.push({
+          name,
+          status: result.candidates.length ? 'skipped' : 'no_candidates',
+          ...(skipReason ? { reason: skipReason } : {}),
+        });
         continue;
       }
       if (selected === 'unplanned') {
         logger.update({ phase: 'alias_plan_update', ...context });
         await target.setAliasMissPlanned(name, false);
         results.push({ name, status: 'unplanned' });
-        ui.write(`已标为无计划：${name}`);
+        ui!.write(`已标为无计划：${name}`);
         logger.log('info', 'alias_unplanned', '未命中别名已标为无计划', context);
         continue;
       }
@@ -106,7 +156,7 @@ export async function resolveAliasMisses(options: {
       // 复用已有同名别名；尚未存在的名称才作为手动来源写入。
       await target.alias(id, name);
       results.push({ name, status: 'resolved', subjectId: id });
-      ui.write(`已导入：${name} → https://bgm.tv/subject/${id}`);
+      ui?.write(`已导入：${name} → https://bgm.tv/subject/${id}`);
       logger.log('info', 'alias_resolved', '条目已导入，别名已关联', { ...context, subjectId: id });
     } catch (error) {
       throw new Error(

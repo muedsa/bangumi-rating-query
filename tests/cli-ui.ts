@@ -57,6 +57,7 @@ globalThis.fetch = async (input, init) => {
     return Response.json({ total: 1, data: [{ id: keyword === '新关键词' ? 8 : 7, type: 2, name: '候选作品', platform: 'TV' }] });
   }
   if (String(input).endsWith('/v0/subjects/8')) return Response.json({ id: 8, type: 2, name: '新作品', platform: 'TV', rating: { score: 0, total: 0 } });
+  if (String(input).endsWith('/v0/subjects/7')) return Response.json({ id: 7, type: 2, name: '候选作品', platform: 'TV', rating: { score: 0, total: 0 } });
   throw new Error('unexpected network request');
 };`,
   );
@@ -355,6 +356,55 @@ test('Clack 真实键盘流程：有候选时换词搜索，选择后仍绑定�
       [{ name: '原别名', subject_id: 8 }],
     );
     assert.equal(check.db.prepare('SELECT COUNT(*) AS n FROM alias_miss_stats').get()!.n, 0);
+  } finally {
+    check.close();
+  }
+});
+
+test('TTY 自动处理未命中别名不询问参数或读取输入，跳过后继续并复用官方别名', async () => {
+  const { dir, database, mock } = await setup();
+  const seed = new SqliteDriver(database);
+  seed.db
+    .exec(`INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at)
+    VALUES('不匹配','不匹配',2,1,1),('候选作品','候选作品',1,1,1)`);
+  seed.close();
+  const result = await terminal(
+    ['resolve-alias-misses', '--auto', '--json'],
+    {
+      ...cleanEnv,
+      DATABASE_PATH: database,
+      BANGUMI_USER_AGENT: 'test/ui',
+      BANGUMI_ACCESS_TOKEN: '',
+    },
+    dir,
+    mock,
+    [],
+  );
+  assert.equal(result.code, 0, result.stderr);
+  const summary = JSON.parse(result.stdout);
+  assert.equal(summary.resolved, 1);
+  assert.equal(summary.skipped, 1);
+  assert.equal(summary.status, 'completed');
+  assert(result.stderr.includes('自动跳过：不匹配'));
+  assert(result.stderr.includes('自动选择：候选作品'));
+  assert(!result.stderr.includes('选择匹配作品或操作'));
+  assert(!result.stderr.includes('本批最多处理'));
+  const check = new SqliteDriver(database);
+  try {
+    assert.deepEqual(
+      check.db
+        .prepare("SELECT source FROM subject_aliases WHERE name='候选作品'")
+        .all()
+        .map((r) => ({ ...r })),
+      [{ source: 'bangumi' }],
+    );
+    assert.deepEqual(
+      check.db
+        .prepare('SELECT name,planned FROM alias_miss_stats')
+        .all()
+        .map((r) => ({ ...r })),
+      [{ name: '不匹配', planned: 1 }],
+    );
   } finally {
     check.close();
   }

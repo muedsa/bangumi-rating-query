@@ -305,7 +305,7 @@ bun run cli sync-archive --help
 bun run cli sync-archive --file data/subject.jsonlines --as-of 2026-10-20T08:18:54Z --limit 1000 --json --no-interactive --log-file data/logs/import.jsonl
 ```
 
-`resolve-alias-misses` 始终需要明确选择，不接受 `--no-interactive`；仍支持从 stdin 管道按行输入序号、`-1`、`0` 或 `q`，不会自动选择首个候选。其他既有命令和参数继续可用；`migrate` 的旧脚本文本输出保留，显式使用 `--json` 时返回 JSON。
+`resolve-alias-misses` 默认需要明确选择，支持从 stdin 管道按行输入序号、`-1`、`0` 或 `q`。添加 `--auto` 后无需输入，自动处理唯一的完全同名候选，其余跳过；此模式支持 `--no-interactive`，未指定的参数直接使用默认值。其他既有命令和参数继续可用；`migrate` 的旧脚本文本输出保留，显式使用 `--json` 时返回 JSON。
 
 Ctrl+C 取消时退出码为 `130`。Archive 会等待当前写入结束，再保存已完成行的检查点；若检查点保存失败，仍按错误退出（退出码 `1`），可根据日志从上次检查点续跑。别名审核保留已确认完成的结果；下载或导出取消可能留下 `.partial` 文件，需要检查后再重试。
 
@@ -571,9 +571,9 @@ Node/CLI 使用 `.env`，修改后重启；Docker Compose 透传同名变量。W
 
 当前 schema 第 4 版：`0002_alias_miss_stats.sql` 创建统计表，`0003_alias_miss_planned.sql` 增加处理计划，`0004_alias_name_unique.sql` 增加 `(subject_id, name)` 唯一索引。第 4 版迁移会合并旧库中同名的官方和手动记录，保留手动记录及其 ID、时间和上游刷新保护，其余别名、条目和统计保留。Node/CLI 启动时自动按顺序迁移 SQLite/PostgreSQL。Worker 部署前先执行 `bunx wrangler d1 migrations apply DB --remote`（本地使用 `--local`），再部署新版本。未命中统计和处理计划没有对应条目，属于环境统计数据，不包含在现有按条目导出的业务备份中；`stats-prune` 仍只清理每日访问统计。
 
-### 交互处理未命中别名
+### 处理未命中别名
 
-`resolve-alias-misses` 仅从**有计划处理**的记录中按未命中次数顺序取一批名称，使用 Bangumi 的 [`POST /v0/search/subjects`](https://github.com/bangumi/api/blob/master/open-api/v0.yaml) 搜索动画（`filter.type=[2]`，`sort=match`）。每次显示候选的原名、中文名、日期、作品形式、评分、简介和条目链接，由用户确认对应关系。
+`resolve-alias-misses` 仅从**有计划处理**的记录中按未命中次数顺序取一批名称，使用 Bangumi 的 [`POST /v0/search/subjects`](https://github.com/bangumi/api/blob/master/open-api/v0.yaml) 搜索动画（`filter.type=[2]`，`sort=match`）。默认显示候选的原名、中文名、日期、作品形式、评分、简介和条目链接，由用户确认对应关系；也可通过 `--auto` 或主菜单中的“自动匹配”执行自动处理。
 
 ```sh
 bun run build:node
@@ -583,16 +583,21 @@ bun run cli resolve-alias-misses --api-url https://your-api.example.com --limit 
 bun run cli resolve-alias-misses --limit 20 --search-limit 10
 # 降低管理接口调用频率，并保存 JSON 处理结果
 bun run cli resolve-alias-misses --api-url https://your-api.example.com --request-delay-ms 200 > data/alias-review-result.json
+# 自动处理精确同名候选，记录日志和 JSON 结果
+bun run cli resolve-alias-misses --auto --api-url https://your-api.example.com --limit 100 --search-limit 20 --request-delay-ms 200 --json --no-interactive --log-file data/logs/alias-auto.jsonl > data/alias-auto-result.json
 ```
 
 | 参数                 | 默认值 | 说明                                                               |
 | -------------------- | ------ | ------------------------------------------------------------------ |
 | `--limit`            | `20`   | 本批最多处理的别名数，范围 1～100；当前未命中接口最多返回前 100 条 |
-| `--search-limit`     | `10`   | 每个别名最多展示的搜索候选数，范围 1～50；仅获取第一页             |
+| `--search-limit`     | `10`   | 每个别名最多获取的搜索候选数，范围 1～50；仅获取第一页             |
+| `--auto`             | 关闭   | 自动选择原名或中文名完全相同的唯一候选，其余跳过，不等待输入       |
 | `--request-delay-ms` | `0`    | 远程管理请求之间的间隔，单位毫秒                                   |
 | `--request-retries`  | `3`    | 远程管理请求失败后的重试次数，0 关闭                               |
 
-- 交互终端用方向键选择作品，回车确认后立即获取完整详情和评分并导入目标数据库。如果该条目已有本次未命中名称（包括刚同步得到的 Bangumi 别名），直接复用；否则添加为**手动别名**。同一批中多次选中同一条目，只同步一次详情，各名称按唯一规则保存。即使只有一个候选也需要选择。
+- 交互终端用方向键选择作品，回车确认后立即获取完整详情和评分并导入目标数据库。如果该条目已有本次未命中名称（包括刚同步得到的 Bangumi 别名），直接复用；否则添加为**手动别名**。同一批中多次选中同一条目，只同步一次详情，各名称按唯一规则保存。人工模式即使只有一个候选也需要选择。
+- 自动模式比较候选的原名 `name` 和中文名 `nameCn`，任一与原未命中名称完全相同即视为匹配；不忽略大小写、名称中的空格，也不转换季数或繁简体。只在本次返回的候选范围内判断：唯一条目匹配时立即导入并关联别名，无匹配、无结果或多个不同条目完全同名时跳过并继续。跳过不改变处理计划，之后仍可人工处理；不会自动翻页或循环下一批。
+- 自动模式日志记录所选条目及跳过原因，JSON `results` 中的跳过项带 `reason`：`no_exact_match`（无精确匹配）、`ambiguous_exact_match`（同名歧义）或 `no_candidates`（无搜索结果）。`--limit` 同样包含跳过的记录，网络或写入失败仍按原重试策略处理，重试耗尽后停止，保留已完成结果。
 - 菜单提供“换个名称搜索”“暂时跳过”“标为无计划”“结束本批”。有候选时同样可以换词，最多 300 个字符；绑定的始终是**最初的未命中名称**，自定义搜索词不作为新增别名，也不占用额外的 `--limit` 名额。
 - 标为无计划后立即保存状态并进入下一个名称，后续运行不再查询该记录；跳过会保留处理计划。结束本批或 Ctrl+C 保留此前已保存的数据，跳过与未处理的记录下次仍会被查询。
 - 管道 / 非终端保留行式交互：`1`、`2` 等选择候选序号，`-1` 标为无计划，`0`、`s` 或空行跳过，`q` 或 EOF 结束。无候选时还可以直接输入新的搜索名称。

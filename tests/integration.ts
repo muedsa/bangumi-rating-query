@@ -745,6 +745,112 @@ async function runtime(
 }
 
 for (const kind of ['node', 'worker', 'postgres'] as const) {
+  test(`${kind}: CLI 自动处理未命中别名无需 stdin，跳过无匹配和歧义，复用官方名称`, async () => {
+    const searched: string[] = [];
+    let synced = 0;
+    const target = await runtime(
+      kind,
+      false,
+      {
+        userAgent: 'test/auto',
+        accessToken: 'auto-server-token',
+        fetcher: (async (input, init) => {
+          const url = new URL(String(input));
+          if (url.pathname === '/v0/search/subjects') {
+            assert.equal(url.searchParams.get('limit'), '3');
+            const { keyword } = JSON.parse(String(init?.body));
+            searched.push(keyword);
+            const data =
+              keyword === '无结果'
+                ? []
+                : keyword === '歧义'
+                  ? [801, 802].map((id) => ({ id, type: 2, name: keyword }))
+                  : [
+                      { id: 800, type: 2, name: '不相关' },
+                      { id: 802, type: 2, name: '原名', name_cn: '中文名' },
+                    ];
+            return Response.json({ total: data.length, data });
+          }
+          assert.equal(url.pathname, '/v0/subjects/802');
+          synced++;
+          return Response.json({
+            id: 802,
+            type: 2,
+            name: '原名',
+            name_cn: '中文名',
+            rating: { score: 8, total: 10 },
+          });
+        }) as typeof fetch,
+      },
+      true,
+    );
+    const dir = await mkdtemp(join(tmpdir(), 'bangumi-auto-review-'));
+    const names = ['不匹配', '无结果', '歧义', '原名', '中文名', '超出数量'];
+    try {
+      for (const [i, name] of names.entries())
+        await target.sql(`INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at)
+          VALUES('${name}','${name}',${10 - i},1,1)`);
+      await target.sql("INSERT INTO alias_miss_stats VALUES('无计划','无计划',20,1,1,0)");
+      // stdin 保持打开且不输入：自动模式必须独立完成并退出。
+      const { stdout, stderr } = await promisify(execFile)(
+        process.execPath,
+        [
+          join(process.cwd(), 'dist/node/cli.js'),
+          'resolve-alias-misses',
+          '--auto',
+          '--no-interactive',
+          '--json',
+          '--api-url',
+          target.baseUrl,
+          '--limit',
+          '5',
+          '--search-limit',
+          '3',
+        ],
+        {
+          cwd: dir,
+          timeout: 15000,
+          env: {
+            ...process.env,
+            ADMIN_TOKEN: token,
+            BANGUMI_USER_AGENT: '',
+            BANGUMI_ACCESS_TOKEN: '',
+          },
+        },
+      );
+      const summary = JSON.parse(stdout);
+      assert.deepEqual(searched, names.slice(0, 5));
+      assert.equal(synced, 1);
+      assert.equal(summary.status, 'completed');
+      assert.equal(summary.processed, 5);
+      assert.equal(summary.resolved, 2);
+      assert.equal(summary.skipped, 2);
+      assert.equal(summary.noCandidates, 1);
+      assert.deepEqual(
+        summary.results.slice(0, 3).map((r: any) => r.reason),
+        ['no_exact_match', 'no_candidates', 'ambiguous_exact_match'],
+      );
+      assert(stderr.includes('alias_auto_selected'));
+      assert(stderr.includes('alias_auto_skipped'));
+      assert(!stderr.includes('选择序号'));
+      assert.deepEqual(
+        (await target.sql('SELECT name,source FROM subject_aliases ORDER BY name')).map((r) => ({
+          ...r,
+        })),
+        ['中文名', '原名'].map((name) => ({ name, source: 'bangumi' })),
+      );
+      const remaining = await target.sql('SELECT name,planned FROM alias_miss_stats');
+      assert.deepEqual(
+        remaining.map((r) => r.name).sort(),
+        ['不匹配', '无结果', '歧义', '超出数量', '无计划'].sort(),
+      );
+      assert(remaining.every((r) => r.planned === (r.name === '无计划' ? 0 : 1)));
+    } finally {
+      await target.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test(`${kind}: 同条目同名别名跨来源唯一，复用官方记录，保留已有手动来源`, async () => {
     const target = await runtime(kind, false);
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };

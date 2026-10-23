@@ -12,6 +12,7 @@ import { createCliLogger } from '../../src/cli/logger.ts';
 import { syncArchive } from '../../src/cli/sync-archive.ts';
 import { resolveAliasMisses } from '../../src/cli/resolve-alias-misses.ts';
 import { CliCancelled } from '../../src/cli/cancellation.ts';
+import { validateCommandOptions } from '../../src/cli/execute.ts';
 import type { Prompts } from '../../src/cli/prompts.ts';
 
 function answers(values: (string | number | boolean | Error)[]) {
@@ -60,9 +61,34 @@ test('命令参数前后均兼容，显式 false 不丢失，无参数留给菜�
     }).help,
   ).toBe(true);
   expect(help).toContain('--search-limit');
+  expect(help).toContain('--auto');
   expect(help).toContain('--no-interactive');
   expect(help).not.toContain('--checkpoint-interval');
   expect(() => parseCliArgs(['does-not-exist'])).toThrow();
+});
+
+test('别名自动模式兼容参数位置和禁用交互，显式自动不追问参数，菜单提供模式选择', async () => {
+  for (const args of [
+    ['--auto', 'resolve-alias-misses', '--no-interactive'],
+    ['resolve-alias-misses', '--auto', '--no-interactive'],
+  ]) {
+    const { command, values } = parseCliArgs(args);
+    expect(values).toMatchObject({ auto: true, interactive: false });
+    expect(() => validateCommandOptions(command!, values)).not.toThrow();
+  }
+  expect(() => validateCommandOptions('sync-archive', { auto: true })).toThrow('--auto 仅支持');
+  expect(() => validateCommandOptions('resolve-alias-misses', { interactive: false })).toThrow(
+    '需要逐项选择',
+  );
+  const input = { auto: true, apiUrl: 'https://example.com' };
+  expect(await fillParameters('resolve-alias-misses', input, answers([]).prompts)).toEqual(input);
+  const { prompts, asked } = answers(['auto', '30', '15']);
+  expect(await fillParameters('resolve-alias-misses', {}, prompts, true)).toMatchObject({
+    auto: true,
+    limit: '30',
+    searchLimit: '15',
+  });
+  expect(asked[0]).toBe('选择别名处理方式');
 });
 
 test('TTY、重定向、CI 和禁用交互各有明确模式，JSON 输出不妨碍交互', () => {

@@ -212,6 +212,8 @@ export function createPresentation(options: { human: boolean; output?: Writable 
           opts,
         );
         if (entry.phase) clack.log.info(formatProgress(entry), opts);
+      } else if (entry.event === 'alias_auto_selected' || entry.event === 'alias_auto_skipped') {
+        message(entry.message);
       } else if (entry.event === 'archive_resumed') {
         note(
           `文件：${entry.file}\n检查点：第 ${entry.checkpointLine} 行\n从第 ${entry.checkpointLine + 1} 行继续`,

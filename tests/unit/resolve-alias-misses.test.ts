@@ -59,11 +59,147 @@ function setup(names = ['甲', '乙', '丙', '丁']) {
 }
 
 test('处理量和候选量有默认值并严格校验范围', () => {
-  expect(aliasReviewOptionsSchema.parse({})).toEqual({ limit: 20, searchLimit: 10 });
+  expect(aliasReviewOptionsSchema.parse({})).toEqual({ limit: 20, searchLimit: 10, auto: false });
   for (const value of [0, -1, 1.5, 101, 'invalid'])
     expect(() => aliasReviewOptionsSchema.parse({ limit: value })).toThrow();
   for (const value of [0, -1, 1.5, 51, 'invalid'])
     expect(() => aliasReviewOptionsSchema.parse({ searchLimit: value })).toThrow();
+  expect(() => aliasReviewOptionsSchema.parse({ auto: 'false' })).toThrow();
+});
+
+test('自动模式匹配原名或中文名，跳过后继续，精确匹配同一条目只同步一次并遵守处理上限', async () => {
+  const { target, events } = setup(['不匹配', '原名', '中文名', '超出上限']);
+  target.searchSubjects = async (keyword, limit) => {
+    events.push(['search', keyword, limit]);
+    return {
+      total: 2,
+      candidates: [
+        result.candidates[0]!,
+        { ...result.candidates[1]!, name: '原名', nameCn: '中文名' },
+      ],
+    };
+  };
+  const summary = await resolveAliasMisses({
+    target,
+    logger,
+    auto: true,
+    limit: 3,
+    searchLimit: 2,
+  });
+  expect(events).toEqual([
+    ['search', '不匹配', 2],
+    ['search', '原名', 2],
+    ['sync', 12],
+    ['alias', 12, '原名'],
+    ['search', '中文名', 2],
+    ['alias', 12, '中文名'],
+  ]);
+  expect(summary).toMatchObject({
+    status: 'completed',
+    total: 3,
+    processed: 3,
+    resolved: 2,
+    skipped: 1,
+    noCandidates: 0,
+    unplanned: 0,
+    importedSubjects: 1,
+  });
+  expect(summary.results).toEqual([
+    { name: '不匹配', status: 'skipped', reason: 'no_exact_match' },
+    { name: '原名', status: 'resolved', subjectId: 12 },
+    { name: '中文名', status: 'resolved', subjectId: 12 },
+  ]);
+});
+
+test('自动模式不接受模糊匹配，无结果和多个完全同名条目跳过并记录原因，不调用交互或修改计划', async () => {
+  const { target, events } = setup(['Case', '空 格', '第2季', '无结果', '同名', '唯一']);
+  const candidates: Record<string, SubjectSearchResult['candidates']> = {
+    Case: [{ ...result.candidates[0]!, name: 'case' }],
+    '空 格': [{ ...result.candidates[0]!, name: '空格', nameCn: '空 格 ' }],
+    第2季: [{ ...result.candidates[0]!, name: '第二季' }],
+    无结果: [],
+    同名: [
+      { ...result.candidates[0]!, name: '同名' },
+      { ...result.candidates[1]!, nameCn: '同名' },
+    ],
+    唯一: [{ ...result.candidates[1]!, name: '唯一', nameCn: '唯一' }],
+  };
+  target.searchSubjects = async (keyword) => ({
+    total: candidates[keyword]!.length,
+    candidates: candidates[keyword]!,
+  });
+  const logs: any[] = [];
+  const summary = await resolveAliasMisses({
+    target,
+    auto: true,
+    logger: createCliLogger({
+      command: 'test',
+      level: 'info',
+      write: (line) => logs.push(JSON.parse(line)),
+    }),
+    ui: {
+      write() {},
+      choose: async () => {
+        throw new Error('自动模式不应提问');
+      },
+    },
+  });
+  expect(events).toEqual([
+    ['sync', 12],
+    ['alias', 12, '唯一'],
+  ]);
+  expect(summary).toMatchObject({
+    processed: 6,
+    resolved: 1,
+    skipped: 4,
+    noCandidates: 1,
+    unplanned: 0,
+  });
+  expect(summary.results.map((r) => r.reason)).toEqual([
+    'no_exact_match',
+    'no_exact_match',
+    'no_exact_match',
+    'no_candidates',
+    'ambiguous_exact_match',
+    undefined,
+  ]);
+  expect(logs.filter((entry) => entry.event === 'alias_auto_skipped')).toHaveLength(5);
+  expect(logs.find((entry) => entry.reason === 'ambiguous_exact_match').exactSubjectIds).toEqual([
+    11, 12,
+  ]);
+  expect(logs.find((entry) => entry.event === 'alias_auto_selected').subjectId).toBe(12);
+});
+
+test('自动模式请求失败停止后续处理，搜索期间取消不导入', async () => {
+  for (const fail of ['search', 'sync', 'alias', 'cancel']) {
+    const { target, events } = setup(['原名', '下一条']);
+    const controller = new AbortController();
+    target.searchSubjects = async (keyword) => {
+      events.push(['search', keyword]);
+      if (fail === 'search') throw new Error('search failed');
+      if (fail === 'cancel') controller.abort();
+      return { total: 1, candidates: [{ ...result.candidates[0]!, name: keyword }] };
+    };
+    if (fail === 'sync')
+      target.syncSubject = async () => {
+        throw new Error('sync failed');
+      };
+    if (fail === 'alias')
+      target.alias = async () => {
+        throw new Error('alias failed');
+      };
+    const run = resolveAliasMisses({ target, logger, auto: true, signal: controller.signal });
+    if (fail === 'cancel') {
+      expect(await run).toMatchObject({
+        status: 'stopped',
+        processed: 0,
+        importedSubjects: 0,
+        remaining: 2,
+      });
+      expect(events).toEqual([['search', '原名']]);
+    } else await expect(run).rejects.toThrow('第 1 个别名');
+    expect(events.filter((e: any) => e[0] === 'search')).toEqual([['search', '原名']]);
+  }
 });
 
 test('同一条目只同步一次，多个选择分别添加手动别名，无候选不写入且遵守数量', async () => {

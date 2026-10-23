@@ -69,6 +69,8 @@ export async function fillParameters(
   fromMenu = false,
 ): Promise<CliValues> {
   const v = { ...input };
+  // 显式自动执行时，缺省参数直接使用默认值，不在终端中追加提问。
+  if (command === 'resolve-alias-misses' && v.auto) return v;
   const needsFile = ['sync-archive', 'import'].includes(command);
   const guided = fromMenu || (needsFile && !v.file);
   if (needsFile && !v.file)
@@ -121,6 +123,12 @@ export async function fillParameters(
       v.skipInvalid = await prompts.confirm('跳过无法解析的行并保留错误记录？');
   }
   if (command === 'resolve-alias-misses') {
+    if (fromMenu && v.auto === undefined)
+      v.auto =
+        (await prompts.select('选择别名处理方式', [
+          { value: 'manual', label: '人工选择', hint: '逐个查看候选并确认' },
+          { value: 'auto', label: '自动匹配', hint: '仅处理唯一的完全同名候选，其余跳过' },
+        ])) === 'auto';
     if (v.limit === undefined)
       v.limit = await prompts.text({
         message: '本批最多处理多少个别名？',
@@ -129,7 +137,7 @@ export async function fillParameters(
       });
     if (v.searchLimit === undefined)
       v.searchLimit = await prompts.text({
-        message: '每个别名最多展示多少个候选？',
+        message: '每个别名最多搜索多少个候选？',
         defaultValue: '10',
         validate: integerInput(1, 50),
       });
