@@ -353,13 +353,15 @@ bun run cli sync-archive --file data/subject.jsonlines --skip-invalid --limit 10
 
 结果中 `skipped` 是本次跳过数量，`skippedTotal` 是该检查点累计跳过数量。`complete=true` 仅表示已遍历文件；有跳过记录时 `status=partial`，触及批次上限时为 `in_progress`，全部遍历且无跳过时才为 `complete`。允许跳过的运行正常退出，自动化应检查 `status`，不能只凭退出码认定全部数据已入库。
 
-每次默认最多处理 1000 个有效动画条目，跳过的无效条目不占此额度。再次执行相同命令会从检查点继续，追加 `--skip-invalid` 也会复用已有检查点。检查点以文件 SHA-256 和快照时间标识，默认每 20 行以及正常结束时保存；可通过 `--checkpoint-interval` 设置保存间隔，必须为正整数，直接连接 SQLite/PostgreSQL 和远程 API 均支持：
+每次默认最多处理 1000 个有效动画条目，跳过的无效条目不占此额度。再次执行相同命令会从检查点继续，追加 `--skip-invalid` 也会复用已有检查点。检查点以文件 SHA-256 和快照时间标识，默认间隔为 20 行，连续非动画行会合并保存，正常结束时也保存；可通过 `--checkpoint-interval` 设置保存间隔，必须为正整数，直接连接 SQLite/PostgreSQL 和远程 API 均支持：
 
 ```sh
 bun run cli sync-archive --file data/subject.jsonlines --limit 1000 --checkpoint-interval 50
 ```
 
-间隔按原始文件行号计算：默认在第 20、40、60……行处理完成后保存，非动画及主动跳过的坏项也计入行号；空行直接略过，不触发该行的周期保存。达到 `--limit` 时保存一次并标记 `complete=false`，正常扫描到文件末尾时保存并标记 `complete=true`。启动和进度日志包含实际使用的 `checkpointInterval`。修改间隔不会改变检查点标识，续跑时仍按文件绝对行号触发保存；`--dry-run` 始终不写检查点。
+间隔按原始文件行号计算：默认第 20、40、60……行为周期保存点。连续非动画行（`type !== 2`）经过多个保存点时，合并为一次，处理下一条动画或坏项前保存到忽略段末尾；如果忽略段持续到文件结束或取消，则只做结束保存。例如前 200 行都是非动画，第 201 行是动画时，会在处理第 201 行前保存第 200 行，无需发送 10 次检查点请求。坏项仍按 `--skip-invalid` 的原规则处理，不参与这项合并；空行直接略过，不触发周期保存。
+
+达到 `--limit` 时保存一次并标记 `complete=false`，正常扫描到文件末尾时保存并标记 `complete=true`。启动和进度日志包含实际使用的 `checkpointInterval`。修改间隔不会改变检查点标识，续跑时仍按文件绝对行号触发保存；`--dry-run` 始终不写检查点。`MAX_BATCH_SIZE` 控制评分查询接口的批量大小，与 CLI 检查点间隔无关。
 
 失败时保留上次成功保存的检查点，续跑可能重放之后已导入的条目，导入按来源时间保持幂等；错误日志也可能出现重复记录，可按 `archiveKey` 和 `line` 去重。已完成的文件再次执行不会重新导入。新快照会得到新的检查点。
 

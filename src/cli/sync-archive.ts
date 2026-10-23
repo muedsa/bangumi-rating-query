@@ -73,6 +73,7 @@ export async function syncArchive(options: Options) {
   let limited = false;
   let stopped = false;
   let checkpointLine = dryRun ? null : state.line;
+  let checkpointDeferred = false;
   const startedAt = performance.now();
   const progress = (phase: string, subjectId?: number) => ({
     phase,
@@ -110,18 +111,18 @@ export async function syncArchive(options: Options) {
     },
   );
   logger.update(progress('archive_scan'));
-  async function saveCheckpoint(complete?: boolean) {
+  async function saveCheckpoint(complete?: boolean, throughLine = lineNumber) {
     if (!target || !key) return;
     logger.update(progress('checkpoint_write'));
     await target.setState(
       key,
       JSON.stringify({
-        line: lineNumber,
+        line: throughLine,
         skippedTotal,
         ...(complete === undefined ? {} : { complete }),
       }),
     );
-    checkpointLine = lineNumber;
+    checkpointLine = throughLine;
     logger.log('info', 'archive_checkpoint_saved', '已保存导入检查点', progress('archive_scan'));
     logger.update(progress('archive_scan'));
   }
@@ -140,12 +141,35 @@ export async function syncArchive(options: Options) {
     }
     let raw: unknown;
     let record: ReturnType<typeof fromArchive> = null;
+    let parseFailure: { error: unknown } | undefined;
     try {
       raw = JSON.parse(line);
       if (typeof raw === 'object' && raw !== null && 'id' in raw && typeof raw.id === 'number')
         logger.update(progress('archive_parse', raw.id));
       record = fromArchive(raw, asOf);
     } catch (error) {
+      parseFailure = { error };
+    }
+    if (!parseFailure && record === null) {
+      ignored++;
+      // 连续非动画行只累积进度，不为途经的每个保存点发送请求。
+      if (lineNumber % checkpointInterval === 0) checkpointDeferred = true;
+      logger.update(progress('archive_scan'));
+      continue;
+    }
+    if (checkpointDeferred) {
+      // 当前行尚未处理；保存到忽略段末尾，不能越过接下来可能失败的动画或坏项。
+      // 放在解析 catch 外，避免检查点故障被 skip-invalid 当作坏项跳过。
+      await saveCheckpoint(undefined, lineNumber - 1);
+      checkpointDeferred = false;
+      if (options.signal?.aborted) {
+        lineNumber--;
+        stopped = true;
+        break;
+      }
+    }
+    if (parseFailure) {
+      const { error } = parseFailure;
       if (!options.skipInvalid)
         throw new Error(
           dryRun
@@ -210,8 +234,7 @@ export async function syncArchive(options: Options) {
           progress('archive_scan', record.subject.id),
         );
       }
-    } else if (typeof raw === 'object' && raw !== null && 'type' in raw && raw.type !== 2)
-      ignored++;
+    }
     logger.update(progress('archive_scan'));
     if (limit !== null && parsed >= limit) {
       limited = true;

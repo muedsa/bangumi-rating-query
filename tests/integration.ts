@@ -577,6 +577,24 @@ test('CLI Archive 检查点默认间隔 20，可配置并沿用原检查点，�
       await assert.rejects(run(['--checkpoint-interval', invalid]));
       assert.equal(requests, before, '无效间隔必须在读写检查点或导入前拒绝');
     }
+
+    // 用真实 CLI 和 HTTP 计数：200 行非动画仅合并保存一次，尾部 200 行只最终保存。
+    await writeFile(
+      file,
+      Array.from({ length: 401 }, (_, i) =>
+        JSON.stringify({ id: i + 1, type: i === 200 ? 2 : 4, name: `条目${i + 1}` }),
+      ).join('\n'),
+    );
+    reset();
+    const before = requests;
+    const merged = await run();
+    assert.equal(JSON.parse(merged.stdout).imported, 1);
+    assert.deepEqual(saved, [
+      { line: 200, skippedTotal: 0 },
+      { line: 401, skippedTotal: 0, complete: true },
+    ]);
+    assert.deepEqual(imported, [201]);
+    assert.equal(requests - before, 4, '只读一次检查点、导入一条动画、保存两次检查点');
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
