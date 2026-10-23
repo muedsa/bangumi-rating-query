@@ -28,7 +28,7 @@ export const commands = [
   ['retention-preview', '预览冷数据', ['days']],
   ['download-archive', '下载 Archive', ['out']],
   ['export', '导出备份', ['out', 'request-delay-ms']],
-  ['import', '恢复备份到空数据库', ['file', 'request-delay-ms']],
+  ['import', '恢复备份 / 继续恢复', ['file', 'request-delay-ms']],
   ['stats-prune', '清理每日访问统计', ['days']],
   ['migrate', '迁移本地数据库', []],
 ] as const;

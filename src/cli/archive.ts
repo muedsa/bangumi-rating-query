@@ -2,7 +2,7 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, open, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
-import { pipeline } from 'node:stream/promises';
+import { finished, pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 import { Unzip, UnzipInflate } from 'fflate';
 import { z } from 'zod';
@@ -10,8 +10,9 @@ import { createInterface } from 'node:readline';
 import { checkCancelled } from './cancellation.ts';
 
 export async function* archiveLines(path: string) {
+  const input = createReadStream(path, { encoding: 'utf8' });
   const reader = createInterface({
-    input: createReadStream(path, { encoding: 'utf8' }),
+    input,
     crlfDelay: Infinity,
   });
   try {
@@ -20,7 +21,12 @@ export async function* archiveLines(path: string) {
       yield line;
     }
   } finally {
+    // readline.close() 只暂停输入；提前结束时也必须关闭底层文件描述符。
+    // 读取异常由迭代器传播，清理时不覆盖原始异常。
+    const closed = finished(input, { cleanup: true }).catch(() => {});
     reader.close();
+    input.destroy();
+    await closed;
   }
 }
 

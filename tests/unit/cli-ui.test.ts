@@ -224,6 +224,10 @@ test('Archive 取消在当前成功写入之后保存检查点，续跑不漏数
 });
 
 test('未知总量的进度只显示计数，错误摘要和别名统计可读', () => {
+  expect(resultLines('import', { restored: 2, resumed: 3, total: 5, complete: true })).toEqual([
+    '备份恢复完成',
+    '本次恢复 2 · 已核对并跳过 3 · 总计 5',
+  ]);
   const text = formatProgress({
     phase: 'archive_import',
     line: 80,

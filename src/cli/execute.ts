@@ -2,10 +2,10 @@ import { open, rename } from 'node:fs/promises';
 import { z } from 'zod';
 import { readConfig } from '../config.ts';
 import { nameSchema, positiveId } from '../core/models.ts';
-import { backupSchema } from '../core/backup.ts';
 import { createBangumiSource } from '../adapters/bangumi/client.ts';
-import { archiveLines, downloadArchive, sha256File } from './archive.ts';
+import { downloadArchive, sha256File } from './archive.ts';
 import { syncArchive } from './sync-archive.ts';
+import { restoreBackup } from './restore-backup.ts';
 import { localTarget, remoteTarget } from './target.ts';
 import {
   aliasReviewOptionsSchema,
@@ -195,47 +195,14 @@ export async function executeCommand(
         logger.update({ phase: 'backup_hash', output: out, exported: count });
         return { exported: count, sha256: await sha256File(out, signal) };
       }
-      case 'import': {
-        const file = values.file!;
-        logger.log('info', 'backup_validation_started', '开始完整校验备份文件', { file });
-        const seen = new Set<number>();
-        for await (const line of archiveLines(file)) {
-          checkCancelled(signal);
-          if (!line.trim()) continue;
-          const record = backupSchema.parse(JSON.parse(line));
-          if (seen.has(record.subject.id))
-            throw new Error(`备份中存在重复条目 ${record.subject.id}`);
-          seen.add(record.subject.id);
-          logger.update({ phase: 'backup_validation', file, validated: seen.size });
-        }
-        logger.log('info', 'backup_validation_completed', '备份文件校验完成', {
-          file,
-          records: seen.size,
+      case 'import':
+        return await restoreBackup({
+          file: values.file!,
+          target,
+          logger,
+          signal,
+          maxRecordBytes: values.apiUrl ? 256 * 1024 : undefined,
         });
-        logger.update({ phase: 'backup_check_empty', file, records: seen.size });
-        if ((await target.exportPage(0)).records.length) throw new Error('恢复需要空数据库');
-        let count = 0;
-        for await (const line of archiveLines(file)) {
-          checkCancelled(signal);
-          if (!line.trim()) continue;
-          const record = backupSchema.parse(JSON.parse(line));
-          logger.update({
-            phase: 'backup_restore',
-            file,
-            restored: count,
-            total: seen.size,
-            subjectId: record.subject.id,
-          });
-          await target.restore(record);
-          count++;
-          logger.log('debug', 'backup_record_restored', '备份条目恢复完成', {
-            restored: count,
-            total: seen.size,
-            subjectId: record.subject.id,
-          });
-        }
-        return { restored: count };
-      }
       case 'stats':
         return await target.stats();
       case 'alias-misses':

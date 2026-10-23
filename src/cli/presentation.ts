@@ -90,6 +90,8 @@ export function resultLines(command: CommandName, result: unknown): string[] {
       : ['暂无访问统计'];
   }
   if (command === 'sync-subject') return [`条目 ${r.imported} 同步完成`];
+  if (command === 'import')
+    return ['备份恢复完成', `本次恢复 ${r.restored} · 已核对并跳过 ${r.resumed} · 总计 ${r.total}`];
   if (command === 'alias-add') {
     const a = r.alias ?? r;
     return [
@@ -214,6 +216,11 @@ export function createPresentation(options: { human: boolean; output?: Writable 
         note(
           `文件：${entry.file}\n检查点：第 ${entry.checkpointLine} 行\n从第 ${entry.checkpointLine + 1} 行继续`,
           '导入进度',
+        );
+      } else if (entry.event === 'backup_restore_started') {
+        note(
+          `文件：${entry.file}\n总计：${entry.total} 条\n${entry.resuming ? `已有检查点：${entry.checkpoint} 条，将核对已写入内容后继续` : '首次恢复，已保存文件恢复检查点'}`,
+          '备份恢复',
         );
       } else if (entry.event === 'api_request_retry') {
         stop();

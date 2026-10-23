@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
@@ -21,10 +21,16 @@ import type { ImportRecord } from '../src/core/models.ts';
 import { batchResponseSchema } from '../src/http/openapi.ts';
 import { BangumiClient } from '../src/adapters/bangumi/client.ts';
 import { QueryService } from '../src/core/query-service.ts';
+import { restoreBackup } from '../src/cli/restore-backup.ts';
+import { remoteTarget } from '../src/cli/remote-target.ts';
+import { createCliLogger } from '../src/cli/logger.ts';
+import { backupFixture } from './helpers/backup.ts';
+import { normalizeName } from '../src/core/matching.ts';
 import { postgresTestDatabase } from './helpers/postgres.ts';
 import './postgres.ts';
 import './migrations.ts';
 import './cli-ui.ts';
+import './backup-recovery.ts';
 
 const token = 'integration-test-token-with-32-characters';
 const migration = MIGRATIONS.map((file) => readFileSync(`migrations/${file}`, 'utf8')).join('\n');
@@ -717,6 +723,115 @@ async function runtime(
     sql: async (sql: string) => (await db.prepare(sql).all()).results,
     close: () => mf.dispose(),
   };
+}
+
+for (const kind of ['node', 'worker', 'postgres'] as const) {
+  test(`${kind}: 显式 ID 和官方链接不消耗名称候选预算，名称查询仍受限`, async () => {
+    const target = await runtime(kind, true, undefined, true);
+    const batch = (items: unknown[]) =>
+      target.fetch('/api/v1/ratings/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      });
+    try {
+      await target.sql(`WITH RECURSIVE ids(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM ids WHERE id<1001)
+        INSERT INTO subjects(id,name,air_date,platform,metadata_at,cached_at)
+        SELECT id,'作品'||id,'2026-01-01','TV',1,1 FROM ids`);
+      await target.sql(`INSERT INTO subject_aliases(id,subject_id,name,normalized_name,source,created_at,updated_at)
+        SELECT 'a'||id,id,'共同名称','共同名称','bangumi',1,1 FROM subjects`);
+      const link = 'https://bgm.tv/subject/1';
+      await target.sql(`INSERT INTO subject_aliases(id,subject_id,name,normalized_name,source,created_at,updated_at)
+        SELECT 'link'||id,id,'${link}','${normalizeName(link)}','bangumi',1,1 FROM subjects`);
+      await target.sql(`INSERT INTO subject_aliases(id,subject_id,name,normalized_name,source,created_at,updated_at)
+        VALUES('unique',1,'独有名称','独有名称','manual',1,1)`);
+      const limited = await batch([{ inputId: 'name', names: ['共同名称'] }]);
+      assert.equal(limited.status, 400);
+      assert.equal(((await limited.json()) as any).error.code, 'TOO_MANY_CANDIDATES');
+      const response = await batch([
+        {
+          inputId: 'id',
+          subjectId: 1,
+          names: ['共同名称', '忽略的未知名称', '独有名称'],
+          year: 2026,
+          platform: 'TV',
+        },
+        { inputId: 'year', subjectId: 1, names: ['共同名称'], year: 2025 },
+        { inputId: 'platform', subjectId: 1, names: ['共同名称'], platform: 'OVA' },
+        { inputId: 'link', names: [link] },
+        { inputId: 'name', names: ['独有名称'] },
+        { inputId: 'miss', names: ['真正未知'] },
+      ]);
+      assert.equal(response.status, 200);
+      const { results } = (await response.json()) as any;
+      assert.deepEqual(
+        results.map((r: any) => r.status),
+        ['matched', 'not_found', 'not_found', 'matched', 'matched', 'not_found'],
+      );
+      assert.equal(results[0].subject.id, 1);
+      assert.equal(results[0].matchReason, 'subject_id');
+      assert.deepEqual(results[0].matchedAliases, []);
+      assert.equal(results[3].matchReason, 'subject_id');
+      assert.deepEqual(results[3].matchedAliases, []);
+      assert.deepEqual(results[4].matchedAliases, [{ name: '独有名称', source: 'manual' }]);
+      assert.deepEqual(
+        (await target.sql('SELECT name FROM alias_miss_stats')).map((r: any) => r.name),
+        ['真正未知'],
+      );
+      assert.equal(
+        (await target.sql('SELECT total_hits FROM subject_usage WHERE subject_id=1'))[0]!
+          .total_hits,
+        1,
+      );
+    } finally {
+      await target.close();
+    }
+  });
+
+  test(`${kind}: 远程备份恢复响应丢失和检查点失败后续跑，数据保持原样`, async () => {
+    const server = await runtime(kind, false);
+    const dir = await mkdtemp(join(tmpdir(), 'bangumi-remote-restore-'));
+    const file = join(dir, 'backup.jsonl');
+    const records = [backupFixture(2), backupFixture(1)];
+    await writeFile(file, records.map((r) => JSON.stringify(r)).join('\n'));
+    const restoreRequests: number[] = [];
+    const target = remoteTarget(server.baseUrl, token, {
+      fetcher: (async (input, init) => {
+        const response = await fetch(input, init);
+        if (String(input).endsWith('/restore')) {
+          assert.equal(response.status, 200);
+          restoreRequests.push(JSON.parse(String(init!.body)).subject.id);
+          if (restoreRequests.length === 1) {
+            await response.arrayBuffer();
+            throw new TypeError('模拟服务器写入成功后连接断开');
+          }
+        }
+        return response;
+      }) as typeof fetch,
+    });
+    const logger = createCliLogger({ command: 'import', level: 'silent' });
+    const run = () => restoreBackup({ file, target, logger, maxRecordBytes: 256 * 1024 });
+    const setState = target.setState;
+    try {
+      await assert.rejects(run, /第 1 行恢复失败/);
+      target.setState = async (key, value) => {
+        if (JSON.parse(value).completed === 2) throw new Error('模拟检查点请求失败');
+        await setState(key, value);
+      };
+      await assert.rejects(run, /第 2 行恢复失败/);
+      target.setState = setState;
+      assert.deepEqual(await run(), { restored: 0, resumed: 2, total: 2, complete: true });
+      assert.deepEqual(restoreRequests, [2, 1]);
+      assert.deepEqual((await target.exportPage(0)).records, records.reverse());
+      assert.equal(
+        JSON.parse(String((await server.sql('SELECT value FROM sync_state'))[0]!.value)).complete,
+        true,
+      );
+    } finally {
+      await server.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 }
 
 for (const kind of ['node', 'postgres'] as const)
@@ -1724,6 +1839,12 @@ test('Node CLI: Archive 断点、备份恢复与流式解压', async () => {
   await run(['export', '--out', backup]);
   const target = join(dir, 'target.sqlite');
   assert.equal(JSON.parse((await run(['import', '--file', backup], target)).stdout).restored, 2);
+  assert.deepEqual(JSON.parse((await run(['import', '--file', backup], target)).stdout), {
+    restored: 0,
+    resumed: 2,
+    total: 2,
+    complete: true,
+  });
   const backup2 = join(dir, 'backup2.jsonl');
   await run(['export', '--out', backup2], target);
   assert.equal(await readFile(backup2, 'utf8'), await readFile(backup, 'utf8'));

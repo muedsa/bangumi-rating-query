@@ -21,7 +21,14 @@ export class QueryService {
     onAliasMissStatsError = this.options.onAliasMissStatsError,
   ) {
     const now = (this.options.now ?? Date.now)();
-    const keys = [...new Set(items.flatMap((i) => i.names ?? []).map(normalizeName))];
+    const keys = [
+      ...new Set(
+        items
+          .flatMap((item) => (item.subjectId === undefined ? (item.names ?? []) : []))
+          .filter((name) => extractSubjectId(name) === null)
+          .map(normalizeName),
+      ),
+    ];
     const aliases = await this.repo.findAliases(keys);
     const directIds = items.flatMap((item) =>
       item.subjectId
@@ -87,11 +94,14 @@ export class QueryService {
       const subject = candidates[0]!;
       const rating = ratings.get(subject.id);
       hits.add(subject.id);
-      const matchedAliases = aliases.filter(
-        (a) =>
-          a.subjectId === subject.id &&
-          item.names?.some((n) => normalizeName(n) === a.normalizedName),
-      );
+      const matchedAliases =
+        item.subjectId !== undefined
+          ? []
+          : aliases.filter(
+              (a) =>
+                a.subjectId === subject.id &&
+                item.names?.some((n) => normalizeName(n) === a.normalizedName),
+            );
       return {
         ...base,
         status: 'matched' as const,

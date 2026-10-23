@@ -21,6 +21,19 @@ export const backupSchema = z
       .max(3660),
   })
   .superRefine((r, ctx) => {
+    if (new Set(r.aliases.map((alias) => alias.id)).size !== r.aliases.length)
+      ctx.addIssue({ code: 'custom', path: ['aliases'], message: '备份中存在重复别名 ID' });
+    if (
+      new Set(r.aliases.map((alias) => JSON.stringify([alias.name, alias.source]))).size !==
+      r.aliases.length
+    )
+      ctx.addIssue({
+        code: 'custom',
+        path: ['aliases'],
+        message: '备份中存在重复名称与来源的别名',
+      });
+    if (new Set(r.daily.map((day) => day.day)).size !== r.daily.length)
+      ctx.addIssue({ code: 'custom', path: ['daily'], message: '备份中存在重复日期的访问统计' });
     if (
       r.aliases.some(
         (a) => a.subjectId !== r.subject.id || a.normalizedName !== normalizeName(a.name),
