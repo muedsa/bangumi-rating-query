@@ -94,7 +94,7 @@ export async function resolveAliasMisses(options: {
       if (!result.candidates.some((candidate) => candidate.id === id))
         throw new Error('选择的条目不在当前候选列表中');
       logger.update({ phase: 'alias_import', ...context, subjectId: id });
-      logger.log('info', 'alias_selected', '已选择候选，开始导入并添加手动别名', {
+      logger.log('info', 'alias_selected', '已选择候选，开始导入并关联别名', {
         ...context,
         subjectId: id,
       });
@@ -103,11 +103,11 @@ export async function resolveAliasMisses(options: {
         if (imported.imported !== id) throw new Error('导入结果条目 ID 与选择不一致');
         synced.add(id);
       }
-      // 使用手动来源，避免后续上游刷新覆盖用户确认的映射。
+      // 复用已有同名别名；尚未存在的名称才作为手动来源写入。
       await target.alias(id, name);
       results.push({ name, status: 'resolved', subjectId: id });
       ui.write(`已导入：${name} → https://bgm.tv/subject/${id}`);
-      logger.log('info', 'alias_resolved', '条目与手动别名已保存', { ...context, subjectId: id });
+      logger.log('info', 'alias_resolved', '条目已导入，别名已关联', { ...context, subjectId: id });
     } catch (error) {
       throw new Error(
         `第 ${index + 1} 个别名 ${JSON.stringify(name)} 处理失败${typeof selected === 'number' ? `（目标条目 ID：${selected}）` : ''}；此前完成的结果已保存。若条目已导入，可使用 alias-add 补充该别名。`,

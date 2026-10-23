@@ -31,6 +31,7 @@ export interface AnimeRepository {
   findAliases(keys: string[]): Promise<Alias[]>;
   listAliases(subjectId: number): Promise<Alias[]>;
   getRatings(ids: number[]): Promise<Rating[]>;
+  /** 同条目已有完全同名别名时返回原记录，来源可能为 bangumi。 */
   addManualAlias(subjectId: number, name: string, now: number): Promise<Alias>;
   updateManualAlias(id: string, name: string, now: number): Promise<Alias | null>;
   deleteManualAlias(id: string): Promise<boolean>;

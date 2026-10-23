@@ -1,5 +1,5 @@
 import { AppError } from '../../core/models.ts';
-import { backupSchema, type BackupRecord } from '../../core/backup.ts';
+import { parseBackupRecord, type BackupRecord } from '../../core/backup.ts';
 import { chunks, sql } from './sql.ts';
 import type { SqlRepository } from './repository.ts';
 import { clearAliasMissesStatement } from './alias-misses.ts';
@@ -28,7 +28,7 @@ export async function exportPage(repo: SqlRepository, after: number, limit = 5) 
 }
 
 export async function restoreRecord(repo: SqlRepository, input: BackupRecord) {
-  const record = backupSchema.parse(input);
+  const record = parseBackupRecord(input);
   const s = record.subject;
   if ((await repo.findSubjects([s.id])).length)
     throw new AppError(409, 'SUBJECT_EXISTS', '恢复目标已存在该条目；请使用空库');

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { backupSchema, type BackupPage, type BackupRecord } from '../core/backup.ts';
+import { parseBackupRecord, type BackupPage, type BackupRecord } from '../core/backup.ts';
 import { archiveLines, sha256File } from './archive.ts';
 import { checkCancelled, CliCancelled } from './cancellation.ts';
 import type { createCliLogger } from './logger.ts';
@@ -22,7 +22,7 @@ const checkpointSchema = z
 
 // 数据库返回顺序和对象原型可能不同，比较规范化后的完整业务内容。
 function recordHash(input: BackupRecord) {
-  const record = backupSchema.parse(input);
+  const record = parseBackupRecord(input);
   record.aliases.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   record.daily.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
   return createHash('sha256').update(JSON.stringify(record)).digest('hex');
@@ -50,7 +50,7 @@ export async function restoreBackup(options: {
     lineNumber++;
     if (!line.trim()) continue;
     try {
-      const record = backupSchema.parse(JSON.parse(line));
+      const record = parseBackupRecord(JSON.parse(line));
       if (subjects.has(record.subject.id))
         throw new Error(`备份中存在重复条目 ${record.subject.id}`);
       subjects.add(record.subject.id);
@@ -103,7 +103,7 @@ export async function restoreBackup(options: {
     lineNumber++;
     if (!line.trim()) continue;
     try {
-      const record = backupSchema.parse(JSON.parse(line));
+      const record = parseBackupRecord(JSON.parse(line));
       if (recordHash(record) !== records[index])
         throw new Error('备份文件在校验后发生变化，请恢复原文件后重试');
       logger.update({

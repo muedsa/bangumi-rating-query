@@ -43,6 +43,17 @@ export const backupSchema = z
       ctx.addIssue({ code: 'custom', message: '备份条目 ID 或检索键不一致' });
   });
 export type BackupRecord = z.infer<typeof backupSchema>;
+
+/** 兼容旧版备份：同名跨来源记录按数据库迁移规则合并，保留手动来源及其 ID。 */
+export function parseBackupRecord(input: unknown): BackupRecord {
+  const record = backupSchema.parse(input);
+  const aliases = new Map<string, BackupRecord['aliases'][number]>();
+  for (const alias of record.aliases) {
+    if (!aliases.has(alias.name) || alias.source === 'manual') aliases.set(alias.name, alias);
+  }
+  return { ...record, aliases: [...aliases.values()] };
+}
+
 export interface BackupPage {
   records: BackupRecord[];
   nextCursor: number | null;

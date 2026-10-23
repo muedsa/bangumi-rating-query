@@ -9,6 +9,10 @@ import { SqlRepository } from '../src/adapters/storage/repository.ts';
 import { MIGRATIONS, SCHEMA_VERSION } from '../src/adapters/storage/schema.ts';
 import { postgresTestDatabase } from './helpers/postgres.ts';
 
+const legacyAliases = `INSERT INTO subject_aliases(id,subject_id,name,normalized_name,source,created_at,updated_at)
+  VALUES ('official',1,'同名','同名','bangumi',1,2),('manual',1,'同名','同名','manual',3,4),
+    ('other',1,'另一个名称','另一个名称','bangumi',5,6)`;
+
 test('SQLite 旧版库升级保留数据，失败回滚并可重试，旧版库暂不就绪', async () => {
   const driver = new SqliteDriver(':memory:');
   const repo = new SqlRepository(driver);
@@ -123,6 +127,59 @@ for (const kind of ['sqlite', 'postgres'] as const)
     }
   });
 
+for (const kind of ['sqlite', 'postgres'] as const)
+  test(`${kind}: v3 同名跨来源别名升级去重并约束唯一，失败回滚不丢数据`, async () => {
+    const pg = kind === 'postgres' ? await postgresTestDatabase(false) : undefined;
+    const driver = pg?.driver ?? new SqliteDriver(':memory:');
+    const repo = new SqlRepository(driver);
+    const directory = kind === 'postgres' ? 'migrations/postgres' : 'migrations';
+    const query = (sql: string) => driver.query({ sql, params: [] });
+    try {
+      for (const file of MIGRATIONS.slice(0, 3))
+        for (const statement of (await readFile(`${directory}/${file}`, 'utf8'))
+          .split(';')
+          .map((s) => s.trim())
+          .filter(Boolean))
+          await query(statement);
+      await query("INSERT INTO subjects(id,name,metadata_at,cached_at) VALUES(1,'旧数据',1,1)");
+      await query(legacyAliases);
+      await query('INSERT INTO subject_usage VALUES(1,10,5)');
+      const migration = await readFile(`${directory}/0004_alias_name_unique.sql`, 'utf8');
+      const broken = await mkdtemp(join(tmpdir(), 'bangumi-schema-v4-'));
+      await writeFile(
+        join(broken, '0004_alias_name_unique.sql'),
+        migration + '\nINSERT INTO missing_table VALUES(1);',
+      );
+      await assert.rejects(async () => driver.migrate(broken));
+      assert.equal((await query('SELECT version FROM schema_version'))[0]!.version, 3);
+      assert.equal((await repo.listAliases(1)).length, 3);
+      await driver.migrate();
+      await driver.migrate();
+      assert.equal(await repo.ready(), true);
+      const aliases = await repo.listAliases(1);
+      assert.equal(aliases.length, 2);
+      assert.deepEqual(
+        { ...aliases.find((a) => a.name === '同名')! },
+        {
+          id: 'manual',
+          subjectId: 1,
+          name: '同名',
+          normalizedName: '同名',
+          source: 'manual',
+          createdAt: 3,
+          updatedAt: 4,
+        },
+      );
+      assert.equal((await query('SELECT total_hits FROM subject_usage'))[0]!.total_hits, 5);
+      await assert.rejects(
+        query("INSERT INTO subject_aliases VALUES('duplicate',1,'同名','同名','bangumi',7,8)"),
+      );
+    } finally {
+      if (pg) await pg.close();
+      else driver.close();
+    }
+  });
+
 test('D1 按顺序应用增量迁移后保留旧数据并更新 schema_version', async () => {
   const mf = new Miniflare(
     convertV4MiniflareOptions({
@@ -148,6 +205,7 @@ test('D1 按顺序应用增量迁移后保留旧数据并更新 schema_version',
         await db
           .prepare("INSERT INTO alias_miss_stats VALUES ('missing','Missing',3,50,100)")
           .run();
+      if (file === '0003_alias_miss_planned.sql') await db.prepare(legacyAliases).run();
     }
     assert.equal(
       (await db.prepare('SELECT version FROM schema_version').first())?.version,
@@ -164,6 +222,16 @@ test('D1 按顺序应用增量迁移后保留旧数据并更新 schema_version',
     assert.equal(
       (await db.prepare('SELECT name FROM subjects WHERE id=1').first())?.name,
       '旧数据',
+    );
+    assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM subject_aliases').first())?.n, 2);
+    assert.equal(
+      (await db.prepare("SELECT id FROM subject_aliases WHERE name='同名'").first())?.id,
+      'manual',
+    );
+    await assert.rejects(
+      db
+        .prepare("INSERT INTO subject_aliases VALUES('duplicate',1,'同名','同名','bangumi',7,8)")
+        .run(),
     );
   } finally {
     await mf.dispose();

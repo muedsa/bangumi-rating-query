@@ -128,7 +128,7 @@ export function getOpenApi(maxBatchSize: number) {
       },
       '/api/v1/admin/subjects/{id}/aliases': {
         post: operation(
-          '幂等添加手动别名，互补末尾季数的中阿数字写法并补全唯一匹配的第一季别名',
+          '幂等添加手动别名，同条目同名时复用任意来源的已有记录，并应用季数别名补全规则',
           aliasResult,
           {
             admin: true,
@@ -192,10 +192,14 @@ export function getOpenApi(maxBatchSize: number) {
         ),
       },
       '/api/v1/admin/restore': {
-        post: operation('恢复一条备份；已存在则拒绝', z.object({ restored: z.number().int() }), {
-          admin: true,
-          body: backupSchema,
-        }),
+        post: operation(
+          '恢复一条备份；合并旧版跨来源同名别名，保留手动记录；条目已存在则拒绝',
+          z.object({ restored: z.number().int() }),
+          {
+            admin: true,
+            body: backupSchema,
+          },
+        ),
       },
       '/api/v1/admin/stats': {
         get: operation('最近 7/30 天及累计热度，最多 100 条', anyObject, { admin: true }),

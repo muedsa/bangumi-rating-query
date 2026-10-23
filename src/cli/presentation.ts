@@ -16,7 +16,7 @@ const phases: Record<string, string> = {
   checkpoint_write: '保存检查点',
   alias_misses_loading: '读取有计划的未命中别名',
   alias_search: '搜索候选',
-  alias_import: '导入作品和手动别名',
+  alias_import: '导入作品并关联别名',
   alias_plan_update: '更新处理计划',
   calendar_sync: '同步放送日历',
   subject_sync: '同步条目',

@@ -153,7 +153,7 @@ export class SqlRepository implements ApplicationRepository {
     );
     if (statements.length) await this.batch(statements);
     const rows = await this.query<Alias>(sql`SELECT ${aliasColumns} FROM subject_aliases
-      WHERE subject_id=${subjectId} AND name=${name} AND source='manual'`);
+      WHERE subject_id=${subjectId} AND name=${name}`);
     return rows[0]!;
   }
   async updateManualAlias(id: string, name: string, now: number) {
@@ -182,8 +182,7 @@ export class SqlRepository implements ApplicationRepository {
       const rows = await this.batch(statements);
       return (rows[0]?.[0] as Alias | undefined) ?? null;
     } catch (error) {
-      if (isUniqueViolation(error))
-        throw new AppError(409, 'ALIAS_EXISTS', '该条目已有相同手动别名');
+      if (isUniqueViolation(error)) throw new AppError(409, 'ALIAS_EXISTS', '该条目已有相同别名');
       throw error;
     }
   }

@@ -60,7 +60,7 @@ export async function aliasInsertStatements(
   };
   for (const alias of existing) addMatch(alias);
   const pending = new Map<string, Match>();
-  const identity = (alias: Seed) => JSON.stringify([alias.subjectId, alias.name, alias.source]);
+  const identity = (alias: Seed) => JSON.stringify([alias.subjectId, alias.name]);
   const existingNames = new Set(existing.map(identity));
   const add = (seed: Seed, generated = false) => {
     const normalizedName = normalizeName(seed.name);
@@ -131,7 +131,7 @@ export async function aliasInsertStatements(
     SELECT ${d.value('id')},${d.value('subjectId', 'integer')},${d.value('name')},
       ${d.value('normalizedName')},${d.value('source')},${now},${now}
     FROM ${d.each(additions)} WHERE ${options.guard ?? sql`true`}
-    ON CONFLICT(subject_id,name,source) DO NOTHING`);
+    ON CONFLICT(subject_id,name) DO NOTHING`);
   statements.push(
     clearAliasMissesStatement(d, [...seedNames, ...additions.map((alias) => alias.name)]),
   );

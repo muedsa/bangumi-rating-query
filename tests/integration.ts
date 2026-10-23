@@ -25,6 +25,7 @@ import { restoreBackup } from '../src/cli/restore-backup.ts';
 import { remoteTarget } from '../src/cli/remote-target.ts';
 import { createCliLogger } from '../src/cli/logger.ts';
 import { backupFixture } from './helpers/backup.ts';
+import { parseBackupRecord } from '../src/core/backup.ts';
 import { normalizeName } from '../src/core/matching.ts';
 import { postgresTestDatabase } from './helpers/postgres.ts';
 import './postgres.ts';
@@ -744,6 +745,109 @@ async function runtime(
 }
 
 for (const kind of ['node', 'worker', 'postgres'] as const) {
+  test(`${kind}: 同条目同名别名跨来源唯一，复用官方记录，保留已有手动来源`, async () => {
+    const target = await runtime(kind, false);
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const send = async (path: string, body: unknown, method = 'POST') => {
+      const response = await target.fetch(path, { method, headers, body: JSON.stringify(body) });
+      assert.equal(response.status, 200, await response.clone().text());
+      return (await response.json()) as any;
+    };
+    const add = (name: string, id = 1) => send(`/api/v1/admin/subjects/${id}/aliases`, { name });
+    try {
+      await send('/api/v1/admin/import', fixture(1, '官方名称', ['已有别名', '作品第二季']));
+      await send('/api/v1/admin/import', fixture(2, '另一作品', []));
+      const before = await target.sql(
+        "SELECT * FROM subject_aliases WHERE subject_id=1 AND name='已有别名'",
+      );
+      await target.sql(
+        "INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at) VALUES('已有别名','已有别名',1,1,1)",
+      );
+      const reused = (await add('已有别名')).alias;
+      assert.equal(reused.id, before[0]!.id);
+      assert.equal(reused.source, 'bangumi');
+      assert.equal((await add('已有别名')).alias.id, reused.id);
+      assert.deepEqual(
+        await target.sql("SELECT * FROM subject_aliases WHERE subject_id=1 AND name='已有别名'"),
+        before,
+      );
+      assert.equal((await target.sql('SELECT * FROM alias_miss_stats')).length, 0);
+      await add('作品第2季');
+      assert.equal(
+        (
+          await target.sql(
+            "SELECT * FROM subject_aliases WHERE subject_id=1 AND name IN ('作品第二季','作品第2季')",
+          )
+        ).length,
+        2,
+      );
+      const manual = (await add('人工名称')).alias;
+      const refreshed = fixture(1, '刷新名称', ['已有别名', '人工名称']);
+      refreshed.subject.metadataAt++;
+      await send('/api/v1/admin/import', refreshed);
+      assert.equal((await add('人工名称')).alias.id, manual.id);
+      assert.equal((await add('人工名称')).alias.source, 'manual');
+      const conflict = await target.fetch(`/api/v1/admin/aliases/${manual.id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ name: '已有别名' }),
+      });
+      assert.equal(conflict.status, 409);
+      assert.equal(((await conflict.json()) as any).error.code, 'ALIAS_EXISTS');
+      const concurrent = await Promise.all([add('并发名称'), add('并发名称')]);
+      assert.equal(concurrent[0].alias.id, concurrent[1].alias.id);
+      assert.equal((await add('已有别名', 2)).alias.subjectId, 2);
+      await add('Case');
+      await add('case');
+      assert.equal(
+        (
+          await target.sql(
+            "SELECT * FROM subject_aliases WHERE subject_id=1 AND name IN ('Case','case')",
+          )
+        ).length,
+        2,
+      );
+      assert.equal(
+        (
+          await target.sql(
+            'SELECT subject_id,name FROM subject_aliases GROUP BY subject_id,name HAVING COUNT(*)>1',
+          )
+        ).length,
+        0,
+      );
+      await assert.rejects(
+        target.sql(
+          "INSERT INTO subject_aliases VALUES('raw-duplicate',1,'已有别名','已有别名','manual',1,1)",
+        ),
+      );
+    } finally {
+      await target.close();
+    }
+  });
+
+  test(`${kind}: 旧备份跨来源同名别名恢复去重，CLI 续跑比较规范化内容`, async () => {
+    const server = await runtime(kind, false);
+    const dir = await mkdtemp(join(tmpdir(), 'bangumi-legacy-backup-'));
+    try {
+      const legacy = backupFixture(1);
+      legacy.aliases[0]!.name = legacy.aliases[1]!.name;
+      legacy.aliases[0]!.normalizedName = legacy.aliases[1]!.normalizedName;
+      const target = remoteTarget(server.baseUrl, token);
+      await target.restore(legacy);
+      assert.deepEqual((await target.exportPage(0)).records, [parseBackupRecord(legacy)]);
+      await server.sql('DELETE FROM subjects');
+      const file = join(dir, 'legacy.jsonl');
+      await writeFile(file, JSON.stringify(legacy));
+      const logger = createCliLogger({ command: 'import', level: 'silent' });
+      assert.equal((await restoreBackup({ file, target, logger })).restored, 1);
+      assert.equal((await restoreBackup({ file, target, logger })).resumed, 1);
+      assert.deepEqual((await target.exportPage(0)).records, [parseBackupRecord(legacy)]);
+    } finally {
+      await server.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test(`${kind}: 显式 ID 和官方链接不消耗名称候选预算，名称查询仍受限`, async () => {
     const target = await runtime(kind, true, undefined, true);
     const batch = (items: unknown[]) =>
@@ -2093,7 +2197,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
             type: 2,
             name: '选定条目',
             platform: 'TV',
-            infobox: [{ key: '别名', value: '上游别名' }],
+            infobox: [{ key: '别名', value: [{ v: '上游别名' }, { v: '乙别名' }] }],
             rating: { score: 8.6, total: 20, rank: 10 },
           });
         }) as typeof fetch,
@@ -2169,7 +2273,17 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       const aliases = await target.sql(
         "SELECT name FROM subject_aliases WHERE subject_id=802 AND source='manual'",
       );
-      assert.deepEqual(aliases.map((r) => r.name).sort(), ['甲别名', '乙别名'].sort());
+      assert.deepEqual(
+        aliases.map((r) => r.name),
+        ['甲别名'],
+      );
+      const officialAlias = await target.sql(
+        "SELECT source FROM subject_aliases WHERE subject_id=802 AND name='乙别名'",
+      );
+      assert.deepEqual(
+        officialAlias.map((r) => r.source),
+        ['bangumi'],
+      );
       assert.deepEqual(
         (await target.sql('SELECT normalized_name FROM alias_miss_stats'))
           .map((r) => r.normalized_name)
@@ -2226,7 +2340,7 @@ test('Node CLI 本地交互处理使用本机 Bangumi Token，输入结束保留
       if (keyword === '不再处理') throw new Error('unplanned should not be searched');
       return Response.json({total:1,data:[{id:7,type:2,name:'本地作品'}]});
     }
-    if (String(url).endsWith('/v0/subjects/7')) return Response.json({id:7,type:2,name:'本地作品',rating:{score:7,total:5}});
+    if (String(url).endsWith('/v0/subjects/7')) return Response.json({id:7,type:2,name:'本地作品',infobox:[{key:'别名',value:'甲'}],rating:{score:7,total:5}});
     throw new Error('unexpected request');
   };`,
   );
@@ -2272,10 +2386,12 @@ test('Node CLI 本地交互处理使用本机 Bangumi Token，输入结束保留
       ['丙'],
     );
     assert.equal(
-      check.db
-        .prepare("SELECT COUNT(*) AS n FROM subject_aliases WHERE name='甲' AND source='manual'")
-        .get()!.n,
+      check.db.prepare("SELECT COUNT(*) AS n FROM subject_aliases WHERE name='甲'").get()!.n,
       1,
+    );
+    assert.equal(
+      check.db.prepare("SELECT source FROM subject_aliases WHERE name='甲'").get()!.source,
+      'bangumi',
     );
     assert.equal(
       check.db.prepare("SELECT planned FROM alias_miss_stats WHERE normalized_name='乙'").get()!
@@ -2429,6 +2545,12 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
         headers: auth,
         body: JSON.stringify({ name: '人工别名' }),
       });
+      const calendarAlias = await target.fetch('/api/v1/admin/subjects/100/aliases', {
+        method: 'POST',
+        headers: auth,
+        body: JSON.stringify({ name: '日历名称' }),
+      });
+      const calendarAliasId = ((await calendarAlias.json()) as any).alias.id;
       // 模拟旧版 calendar 同步已写入的空作品形式，要求重新同步即可补齐。
       await target.sql(
         "INSERT INTO subjects(id,name,metadata_at,cached_at) VALUES(200,'旧日历条目',0,1)",
@@ -2436,6 +2558,13 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       const response = await sync();
       assert.equal(response.status, 200, await response.clone().text());
       const result = (await response.json()) as any;
+      const reusedCalendarAlias = await target.sql(
+        "SELECT id,source FROM subject_aliases WHERE subject_id=100 AND name='日历名称'",
+      );
+      assert.deepEqual(
+        reusedCalendarAlias.map((a) => ({ ...a })),
+        [{ id: calendarAliasId, source: 'manual' }],
+      );
       assert.equal(result.imported, 3);
       assert.equal(requests.length, 3);
       assert.equal(requests[0]!.url, 'https://api.bgm.tv/calendar');

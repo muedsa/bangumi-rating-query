@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { backupSchema } from '../../src/core/backup.ts';
+import { backupSchema, parseBackupRecord } from '../../src/core/backup.ts';
 import { backupFixture } from '../helpers/backup.ts';
 
 test('备份拒绝同条目中重复别名 ID、名称与来源、统计日期', () => {
@@ -16,4 +16,15 @@ test('备份拒绝同条目中重复别名 ID、名称与来源、统计日期',
   valid.aliases[1]!.name = valid.aliases[0]!.name;
   valid.aliases[1]!.normalizedName = valid.aliases[0]!.normalizedName;
   expect(backupSchema.safeParse(valid).success).toBe(true);
+});
+
+test('旧备份中跨来源同名别名合并为手动记录，与排列顺序无关', () => {
+  const record = backupFixture(1);
+  record.aliases[0]!.name = record.aliases[1]!.name;
+  record.aliases[0]!.normalizedName = record.aliases[1]!.normalizedName;
+  const manual = { ...record.aliases[1]! };
+  expect(parseBackupRecord(record).aliases).toEqual([manual]);
+  record.aliases.reverse();
+  expect(parseBackupRecord(record).aliases).toEqual([manual]);
+  expect(record.aliases).toHaveLength(2);
 });
