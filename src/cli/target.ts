@@ -26,7 +26,7 @@ export async function localTarget(
     exportPage: (after: number) => repo.exportPage(after),
     restore: (record: BackupRecord) => repo.restoreRecord(record),
     stats: () => repo.stats(),
-    aliasMisses: (planned?: boolean) => repo.aliasMissStats(planned),
+    aliasMisses: (planned?: boolean, limit?: number) => repo.aliasMissStats(planned, limit),
     setAliasMissPlanned: async (name: string, planned: boolean) => {
       const alias = await repo.setAliasMissPlanned(name, planned);
       if (!alias) throw new AppError(404, 'ALIAS_MISS_NOT_FOUND', '未命中别名记录不存在');

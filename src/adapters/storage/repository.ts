@@ -271,10 +271,10 @@ export class SqlRepository implements ApplicationRepository {
         first_missed_at=CASE WHEN excluded.first_missed_at < alias_miss_stats.first_missed_at THEN excluded.first_missed_at ELSE alias_miss_stats.first_missed_at END,
         last_missed_at=CASE WHEN excluded.last_missed_at > alias_miss_stats.last_missed_at THEN excluded.last_missed_at ELSE alias_miss_stats.last_missed_at END`);
   }
-  async aliasMissStats(planned?: boolean) {
+  async aliasMissStats(planned?: boolean, limit = 100) {
     const rows = await this.query<AliasMiss>(sql`SELECT ${aliasMissColumns} FROM alias_miss_stats
       ${planned === undefined ? sql`` : sql`WHERE planned=${Number(planned)}`}
-      ORDER BY miss_count DESC, last_missed_at DESC, normalized_name LIMIT 100`);
+      ORDER BY miss_count DESC, last_missed_at DESC, normalized_name LIMIT ${limit}`);
     return rows.map((row) => ({ ...row, planned: Boolean(row.planned) }));
   }
   async setAliasMissPlanned(name: string, planned: boolean) {

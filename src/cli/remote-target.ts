@@ -158,12 +158,16 @@ export function remoteTarget(base: string, token: string, options: RemoteTargetO
       await request('/restore', 'POST', record);
     },
     stats: () => request('/stats'),
-    aliasMisses: async (planned?: boolean) =>
-      (
+    aliasMisses: async (planned?: boolean, limit?: number) => {
+      const query = new URLSearchParams();
+      if (planned !== undefined) query.set('planned', String(planned));
+      if (limit !== undefined) query.set('limit', String(limit));
+      return (
         await request<{ aliases: AliasMiss[] }>(
-          `/stats/alias-misses${planned === undefined ? '' : `?planned=${planned}`}`,
+          `/stats/alias-misses${query.size ? `?${query}` : ''}`,
         )
-      ).aliases,
+      ).aliases;
+    },
     setAliasMissPlanned: async (name: string, planned: boolean) =>
       (await request<{ alias: AliasMiss }>('/stats/alias-misses', 'PATCH', { name, planned }))
         .alias,

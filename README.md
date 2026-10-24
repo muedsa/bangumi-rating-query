@@ -548,7 +548,7 @@ GET /api/v1/admin/stats/alias-misses
 Authorization: Bearer <ADMIN_TOKEN>
 ```
 
-响应为 `{ "enabled": true, "aliases": [{ "name": "未知名称", "normalizedName": "未知名称", "missCount": 3, "firstMissedAt": 1792540800000, "lastMissedAt": 1792540860000, "planned": true }] }`。默认包含全部计划状态，可用 `?planned=true` 仅查询有计划记录，`?planned=false` 仅查询无计划记录；先筛选，再按次数取前 100 条。关闭统计开关后仍可查看、修改已有记录。CLI 同样支持本地数据库和远程服务（`alias-misses` 查看全部计划状态）：
+响应为 `{ "enabled": true, "aliases": [{ "name": "未知名称", "normalizedName": "未知名称", "missCount": 3, "firstMissedAt": 1792540800000, "lastMissedAt": 1792540860000, "planned": true }] }`。默认包含全部计划状态，可用 `?planned=true` 仅查询有计划记录，`?planned=false` 仅查询无计划记录；先筛选，再按次数降序返回。默认取前 100 条，可用 `limit` 指定任意正整数数量，例如 `?planned=true&limit=1000`；仅受 JavaScript 安全整数范围限制，没有 100 条的业务上限。关闭统计开关后仍可查看、修改已有记录。CLI 同样支持本地数据库和远程服务（`alias-misses` 查看全部计划状态，默认取前 100 条）：
 
 ```sh
 bun run cli alias-misses
@@ -584,20 +584,21 @@ bun run cli resolve-alias-misses --limit 20 --search-limit 10
 # 降低管理接口调用频率，并保存 JSON 处理结果
 bun run cli resolve-alias-misses --api-url https://your-api.example.com --request-delay-ms 200 > data/alias-review-result.json
 # 自动处理精确同名候选，记录日志和 JSON 结果
-bun run cli resolve-alias-misses --auto --api-url https://your-api.example.com --limit 100 --search-limit 20 --request-delay-ms 200 --json --no-interactive --log-file data/logs/alias-auto.jsonl > data/alias-auto-result.json
+bun run cli resolve-alias-misses --auto --api-url https://your-api.example.com --limit 1000 --search-limit 20 --request-delay-ms 200 --json --no-interactive --log-file data/logs/alias-auto.jsonl > data/alias-auto-result.json
 ```
 
-| 参数                 | 默认值 | 说明                                                               |
-| -------------------- | ------ | ------------------------------------------------------------------ |
-| `--limit`            | `20`   | 本批最多处理的别名数，范围 1～100；当前未命中接口最多返回前 100 条 |
-| `--search-limit`     | `10`   | 每个别名最多获取的搜索候选数，范围 1～50；仅获取第一页             |
-| `--auto`             | 关闭   | 自动选择原名或中文名完全相同的唯一候选，其余跳过，不等待输入       |
-| `--request-delay-ms` | `0`    | 远程管理请求之间的间隔，单位毫秒                                   |
-| `--request-retries`  | `3`    | 远程管理请求失败后的重试次数，0 关闭                               |
+| 参数                 | 默认值 | 说明                                                                 |
+| -------------------- | ------ | -------------------------------------------------------------------- |
+| `--limit`            | `20`   | 本批最多处理的别名数，用户指定正整数，无业务上限；不足时处理现有记录 |
+| `--search-limit`     | `10`   | 每个别名最多获取的搜索候选数，范围 1～50；仅获取第一页               |
+| `--auto`             | 关闭   | 自动选择原名或中文名完全相同的唯一候选，其余跳过，不等待输入         |
+| `--request-delay-ms` | `0`    | 远程管理请求之间的间隔，单位毫秒                                     |
+| `--request-retries`  | `3`    | 远程管理请求失败后的重试次数，0 关闭                                 |
 
 - 交互终端用方向键选择作品，回车确认后立即获取完整详情和评分并导入目标数据库。如果该条目已有本次未命中名称（包括刚同步得到的 Bangumi 别名），直接复用；否则添加为**手动别名**。同一批中多次选中同一条目，只同步一次详情，各名称按唯一规则保存。人工模式即使只有一个候选也需要选择。
 - 自动模式比较候选的原名 `name` 和中文名 `nameCn`，任一与原未命中名称完全相同即视为匹配；不忽略大小写、名称中的空格，也不转换季数或繁简体。只在本次返回的候选范围内判断：唯一条目匹配时立即导入并关联别名，无匹配、无结果或多个不同条目完全同名时跳过并继续。跳过不改变处理计划，之后仍可人工处理；不会自动翻页或循环下一批。
 - 自动模式日志记录所选条目及跳过原因，JSON `results` 中的跳过项带 `reason`：`no_exact_match`（无精确匹配）、`ambiguous_exact_match`（同名歧义）或 `no_candidates`（无搜索结果）。`--limit` 同样包含跳过的记录，网络或写入失败仍按原重试策略处理，重试耗尽后停止，保留已完成结果。
+- 交互向导和命令行都可指定超过 100 的处理数量（例如 `--limit 1000`），本地 SQLite/PostgreSQL 和远程 Worker/Node 使用相同数量查询。远程服务端也需更新到支持 `limit` 查询参数的版本，旧版服务仍固定返回前 100 条；此次调整不需要额外数据库迁移。省略时仍默认处理 20 条，每个别名的候选上限 `--search-limit` 仍为 50。
 - 菜单提供“换个名称搜索”“暂时跳过”“标为无计划”“结束本批”。有候选时同样可以换词，最多 300 个字符；绑定的始终是**最初的未命中名称**，自定义搜索词不作为新增别名，也不占用额外的 `--limit` 名额。
 - 标为无计划后立即保存状态并进入下一个名称，后续运行不再查询该记录；跳过会保留处理计划。结束本批或 Ctrl+C 保留此前已保存的数据，跳过与未处理的记录下次仍会被查询。
 - 管道 / 非终端保留行式交互：`1`、`2` 等选择候选序号，`-1` 标为无计划，`0`、`s` 或空行跳过，`q` 或 EOF 结束。无候选时还可以直接输入新的搜索名称。

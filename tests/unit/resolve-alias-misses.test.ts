@@ -60,11 +60,35 @@ function setup(names = ['甲', '乙', '丙', '丁']) {
 
 test('处理量和候选量有默认值并严格校验范围', () => {
   expect(aliasReviewOptionsSchema.parse({})).toEqual({ limit: 20, searchLimit: 10, auto: false });
-  for (const value of [0, -1, 1.5, 101, 'invalid'])
+  for (const value of [0, -1, 1.5, 'invalid', Infinity, Number.MAX_SAFE_INTEGER + 1])
     expect(() => aliasReviewOptionsSchema.parse({ limit: value })).toThrow();
+  for (const value of [101, 1000, Number.MAX_SAFE_INTEGER])
+    expect(aliasReviewOptionsSchema.parse({ limit: value }).limit).toBe(value);
   for (const value of [0, -1, 1.5, 51, 'invalid'])
     expect(() => aliasReviewOptionsSchema.parse({ searchLimit: value })).toThrow();
   expect(() => aliasReviewOptionsSchema.parse({ auto: 'false' })).toThrow();
+});
+
+test('本批数量超过 100 时向目标传递用户数量，人工和自动模式都处理到指定条数', async () => {
+  const names = Array.from({ length: 130 }, (_, i) => `作品${i}`);
+  for (const auto of [false, true]) {
+    const { target, events } = setup(names);
+    target.aliasMisses = async (planned, limit) => {
+      expect(planned).toBe(true);
+      expect(limit).toBe(125);
+      return names.map(miss);
+    };
+    const summary = await resolveAliasMisses({
+      target,
+      logger,
+      auto,
+      limit: 125,
+      ui: { write() {}, choose: async () => 'skip' },
+    });
+    expect(summary).toMatchObject({ total: 125, processed: 125, status: 'completed' });
+    expect(summary.results.map((r) => r.name)).toEqual(names.slice(0, 125));
+    expect(events.filter((e: any) => e[0] === 'search')).toHaveLength(125);
+  }
 });
 
 test('自动模式匹配原名或中文名，跳过后继续，精确匹配同一条目只同步一次并遵守处理上限', async () => {

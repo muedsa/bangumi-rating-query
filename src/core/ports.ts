@@ -50,7 +50,7 @@ export interface ApplicationRepository extends AnimeRepository {
   exportPage(after: number): Promise<BackupPage>;
   restoreRecord(record: BackupRecord): Promise<void>;
   stats(): Promise<Record<string, unknown>[]>;
-  aliasMissStats(planned?: boolean): Promise<AliasMiss[]>;
+  aliasMissStats(planned?: boolean, limit?: number): Promise<AliasMiss[]>;
   setAliasMissPlanned(name: string, planned: boolean): Promise<AliasMiss | null>;
   pruneDaily(days: number): Promise<{ deleted: number; hasMore: boolean }>;
   retentionPreview(

@@ -82,10 +82,19 @@ test('别名自动模式兼容参数位置和禁用交互，显式自动不追�
   );
   const input = { auto: true, apiUrl: 'https://example.com' };
   expect(await fillParameters('resolve-alias-misses', input, answers([]).prompts)).toEqual(input);
-  const { prompts, asked } = answers(['auto', '30', '15']);
+  const { prompts, asked } = answers(['auto', '1000', '15']);
+  const answerText = prompts.text;
+  prompts.text = async (question) => {
+    if (question.message === '本批最多处理多少个别名？') {
+      expect(question.validate?.('1000')).toBeUndefined();
+      expect(question.validate?.('0')).toBeDefined();
+      expect(question.validate?.('1.5')).toBeDefined();
+    }
+    return answerText(question);
+  };
   expect(await fillParameters('resolve-alias-misses', {}, prompts, true)).toMatchObject({
     auto: true,
-    limit: '30',
+    limit: '1000',
     searchLimit: '15',
   });
   expect(asked[0]).toBe('选择别名处理方式');

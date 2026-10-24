@@ -210,9 +210,18 @@ export function createApp(
   );
   app.get('/api/v1/admin/stats/alias-misses', async (c) => {
     const planned = z.enum(['true', 'false']).optional().parse(c.req.query('planned'));
+    const limit = z.coerce
+      .number()
+      .int()
+      .positive()
+      .safe()
+      .parse(c.req.query('limit') ?? '100');
     return c.json({
       enabled: config.ALIAS_MISS_STATS_ENABLED,
-      aliases: await repo.aliasMissStats(planned === undefined ? undefined : planned === 'true'),
+      aliases: await repo.aliasMissStats(
+        planned === undefined ? undefined : planned === 'true',
+        limit,
+      ),
     });
   });
   app.patch('/api/v1/admin/stats/alias-misses', async (c) => {

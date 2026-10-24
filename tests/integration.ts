@@ -745,6 +745,83 @@ async function runtime(
 }
 
 for (const kind of ['node', 'worker', 'postgres'] as const) {
+  test(`${kind}: 未命中别名按自定数量读取，远程 CLI 可处理超过 100 条`, async () => {
+    const searched: string[] = [];
+    const target = await runtime(kind, false, {
+      userAgent: 'test/alias-limit',
+      accessToken: '',
+      fetcher: (async (input, init) => {
+        assert.equal(new URL(String(input)).pathname, '/v0/search/subjects');
+        searched.push(JSON.parse(String(init?.body)).keyword);
+        return Response.json({ total: 0, data: [] });
+      }) as typeof fetch,
+    });
+    const dir = await mkdtemp(join(tmpdir(), 'bangumi-alias-limit-'));
+    const headers = { Authorization: `Bearer ${token}` };
+    const path = '/api/v1/admin/stats/alias-misses';
+    const load = async (query = '') => {
+      const response = await target.fetch(path + query, { headers });
+      assert.equal(response.status, 200, await response.clone().text());
+      return ((await response.json()) as any).aliases as { name: string; planned: boolean }[];
+    };
+    try {
+      await target.sql(`WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<125)
+        INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at,planned)
+        SELECT '待处理'||n,'待处理'||n,1000-n,1,1,1 FROM nums`);
+      await target.sql("INSERT INTO alias_miss_stats VALUES('无计划','无计划',2000,1,1,0)");
+      assert.equal((await load()).length, 100);
+      const expected = Array.from({ length: 125 }, (_, i) => `待处理${i + 1}`);
+      assert.deepEqual(
+        (await load('?planned=true&limit=123')).map((r) => r.name),
+        expected.slice(0, 123),
+      );
+      assert.deepEqual(
+        (await load(`?planned=true&limit=${Number.MAX_SAFE_INTEGER}`)).map((r) => r.name),
+        expected,
+      );
+      assert.deepEqual(
+        await load('?planned=false&limit=1000').then((rows) => rows.map((r) => r.name)),
+        ['无计划'],
+      );
+      for (const invalid of ['0', '-1', '1.5', '', 'NaN', 'Infinity', '9007199254740992'])
+        assert.equal((await target.fetch(`${path}?limit=${invalid}`, { headers })).status, 400);
+      assert.equal((await target.fetch(`${path}?limit=1000`)).status, 401);
+      const spec = (await (await target.fetch('/openapi.json')).json()) as any;
+      const parameter = spec.paths[path].get.parameters.find((p: any) => p.name === 'limit');
+      assert.equal(parameter.schema.default, 100);
+      assert.equal(parameter.schema.maximum, Number.MAX_SAFE_INTEGER);
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [
+          join(process.cwd(), 'dist/node/cli.js'),
+          'resolve-alias-misses',
+          '--auto',
+          '--no-interactive',
+          '--json',
+          '--api-url',
+          target.baseUrl,
+          '--limit',
+          '121',
+          '--request-retries',
+          '0',
+          '--log-level',
+          'silent',
+        ],
+        { cwd: dir, timeout: 30000, env: { ...process.env, ADMIN_TOKEN: token } },
+      );
+      const summary = JSON.parse(stdout);
+      assert.equal(summary.total, 121);
+      assert.equal(summary.processed, 121);
+      assert.equal(summary.noCandidates, 121);
+      assert.equal(summary.status, 'completed');
+      assert.deepEqual(searched, expected.slice(0, 121));
+      assert.equal((await load('?planned=true&limit=1000')).length, 125);
+    } finally {
+      await target.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test(`${kind}: CLI 自动处理未命中别名无需 stdin，跳过无匹配和歧义，复用官方名称`, async () => {
     const searched: string[] = [];
     let synced = 0;
@@ -2513,7 +2590,7 @@ test('Node CLI 本地交互处理使用本机 Bangumi Token，输入结束保留
   const untouched = join(dir, 'untouched.sqlite');
   for (const args of [
     ['--limit', '0'],
-    ['--limit', '101'],
+    ['--limit', '9007199254740992'],
     ['--search-limit', '51'],
   ])
     await assert.rejects(

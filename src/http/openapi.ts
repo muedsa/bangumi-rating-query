@@ -206,7 +206,7 @@ export function getOpenApi(maxBatchSize: number) {
       },
       '/api/v1/admin/stats/alias-misses': {
         get: operation(
-          '未知别名的累计未命中次数，可按处理计划筛选后按次数降序取最多 100 条',
+          '未知别名的累计未命中次数，可按处理计划筛选后按次数降序返回，数量由 limit 指定',
           z.object({
             enabled: z.boolean(),
             aliases: z.array(aliasMiss),
@@ -219,6 +219,17 @@ export function getOpenApi(maxBatchSize: number) {
                 in: 'query',
                 description: 'true 仅有计划，false 仅无计划；省略时返回全部状态',
                 schema: { type: 'boolean' },
+              },
+              {
+                name: 'limit',
+                in: 'query',
+                description: '最多返回的记录数，正整数，无业务上限；省略时默认 100',
+                schema: {
+                  type: 'integer',
+                  minimum: 1,
+                  maximum: Number.MAX_SAFE_INTEGER,
+                  default: 100,
+                },
               },
             ],
           },

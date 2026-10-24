@@ -409,3 +409,33 @@ test('TTY 自动处理未命中别名不询问参数或读取输入，跳过后�
     check.close();
   }
 });
+
+test('本地 CLI 按用户数量处理超过 100 条未命中别名，不重复处理跳过项', async () => {
+  const { dir, database, mock } = await setup();
+  const seed = new SqliteDriver(database);
+  seed.db.exec(`WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<125)
+    INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at)
+    SELECT '待处理'||n,'待处理'||n,1000-n,1,1 FROM nums`);
+  seed.close();
+  const result = await terminal(
+    ['resolve-alias-misses', '--auto', '--limit', '121', '--json', '--log-level', 'silent'],
+    {
+      ...cleanEnv,
+      DATABASE_PATH: database,
+      BANGUMI_USER_AGENT: 'test/ui',
+      BANGUMI_ACCESS_TOKEN: '',
+    },
+    dir,
+    mock,
+    [],
+  );
+  assert.equal(result.code, 0, result.stderr);
+  const summary = JSON.parse(result.stdout);
+  assert.equal(summary.total, 121);
+  assert.equal(summary.processed, 121);
+  assert.equal(summary.skipped, 121);
+  assert.deepEqual(
+    summary.results.map((r: any) => r.name),
+    Array.from({ length: 121 }, (_, i) => `待处理${i + 1}`),
+  );
+});

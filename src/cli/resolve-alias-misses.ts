@@ -5,12 +5,12 @@ import { MAX_SEARCH_CANDIDATES, type SubjectSearchResult } from '../core/subject
 import type { createCliLogger } from './logger.ts';
 
 export const aliasReviewOptionsSchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(20),
+  limit: z.coerce.number().int().positive().safe().default(20),
   searchLimit: z.coerce.number().int().min(1).max(MAX_SEARCH_CANDIDATES).default(10),
   auto: z.boolean().default(false),
 });
 export interface AliasReviewTarget {
-  aliasMisses(planned?: boolean): Promise<AliasMiss[]>;
+  aliasMisses(planned?: boolean, limit?: number): Promise<AliasMiss[]>;
   setAliasMissPlanned(name: string, planned: boolean): Promise<AliasMiss>;
   searchSubjects(keyword: string, limit: number): Promise<SubjectSearchResult>;
   syncSubject(id: number): Promise<{ imported: number }>;
@@ -40,7 +40,7 @@ export async function resolveAliasMisses(options: {
   const { target, ui, logger } = options;
   if (!auto && !ui) throw new Error('人工处理未命中别名需要交互界面');
   logger.update({ phase: 'alias_misses_loading', limit, searchLimit, auto });
-  const misses = (await target.aliasMisses(true)).slice(0, limit);
+  const misses = (await target.aliasMisses(true, limit)).slice(0, limit);
   const results: {
     name: string;
     status: 'resolved' | 'skipped' | 'no_candidates' | 'unplanned';

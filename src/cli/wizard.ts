@@ -133,7 +133,7 @@ export async function fillParameters(
       v.limit = await prompts.text({
         message: '本批最多处理多少个别名？',
         defaultValue: '20',
-        validate: integerInput(1, 100),
+        validate: integerInput(1),
       });
     if (v.searchLimit === undefined)
       v.searchLimit = await prompts.text({
