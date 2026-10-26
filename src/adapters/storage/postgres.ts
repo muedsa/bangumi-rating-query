@@ -2,7 +2,7 @@ import postgres from 'postgres';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { Row, SqlDriver, Statement } from './sql.ts';
-import { MIGRATIONS, readSchemaVersion } from './schema.ts';
+import { pendingMigrations, readSchemaVersion } from './schema.ts';
 
 // int8 和 SUM(bigint) 的 numeric 结果必须与 SQLite 的 JSON number 契约一致。
 // 超过安全整数范围时拒绝返回，避免静默丢失精度。
@@ -25,7 +25,7 @@ export async function migratePostgres(query: Query, directory = 'migrations/post
         }[],
       )
     : 0;
-  for (const file of MIGRATIONS.slice(version)) {
+  for (const { file } of pendingMigrations(version)) {
     const migration = await readFile(resolve(directory, file), 'utf8');
     // 当前迁移仅含普通 DDL；逐条执行，兼容预编译查询协议。
     for (const sql of migration
@@ -34,6 +34,11 @@ export async function migratePostgres(query: Query, directory = 'migrations/post
       .filter(Boolean))
       await query({ sql, params: [] });
   }
+  readSchemaVersion(
+    (await query({ sql: 'SELECT version FROM schema_version', params: [] })) as {
+      version: number;
+    }[],
+  );
 }
 
 export class PostgresDriver implements SqlDriver {

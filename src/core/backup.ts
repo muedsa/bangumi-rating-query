@@ -57,7 +57,7 @@ export const backupSchema = z
   });
 export type BackupRecord = z.infer<typeof backupSchema>;
 
-/** 兼容旧版备份：同名跨来源记录按数据库迁移规则合并，保留手动来源及其 ID。 */
+/** 兼容旧版备份：合并同名跨来源记录，保留手动来源及其 ID。 */
 export function parseBackupRecord(input: unknown): BackupRecord {
   const record = backupSchema.parse(input);
   const aliases = new Map<string, BackupRecord['aliases'][number]>();

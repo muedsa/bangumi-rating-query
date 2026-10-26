@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { Row, SqlDriver, Statement } from './sql.ts';
-import { MIGRATIONS, readSchemaVersion } from './schema.ts';
+import { pendingMigrations, readSchemaVersion } from './schema.ts';
 
 export class SqliteDriver implements SqlDriver {
   readonly db: DatabaseSync;
@@ -39,8 +39,11 @@ export class SqliteDriver implements SqlDriver {
             this.db.prepare('SELECT version FROM schema_version').all() as { version: number }[],
           )
         : 0;
-      for (const file of MIGRATIONS.slice(version))
+      for (const { file } of pendingMigrations(version))
         this.db.exec(readFileSync(resolve(directory, file), 'utf8'));
+      readSchemaVersion(
+        this.db.prepare('SELECT version FROM schema_version').all() as { version: number }[],
+      );
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');

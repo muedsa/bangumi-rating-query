@@ -7,7 +7,7 @@
 | Cloudflare | Worker                        | D1                  |
 | 自部署     | Node.js + Hono，可使用 Docker | SQLite / PostgreSQL |
 
-两种入口共享查询业务、参数校验和 JSON 契约。业务层不依赖 Cloudflare 或 Node.js；数据库差异集中在适配器中。Drizzle 用于构造参数化 SQL，D1 与 SQLite 共用迁移 SQL，PostgreSQL 使用 `migrations/postgres` 中的独立迁移。Node 的 SQLite 使用内置 `node:sqlite`，PostgreSQL 使用 Postgres.js 连接池，均无需编译原生数据库插件。
+两种入口共享查询业务、参数校验和 JSON 契约。业务层不依赖 Cloudflare 或 Node.js；数据库差异集中在适配器中。Drizzle 用于构造参数化 SQL，D1 与 SQLite 共用 `migrations/0001_initial.sql`，PostgreSQL 使用 `migrations/postgres/0001_initial.sql`。两份初始迁移直接创建完整结构，保留迁移目录及框架以支持后续升级。Node 的 SQLite 使用内置 `node:sqlite`，PostgreSQL 使用 Postgres.js 连接池，均无需编译原生数据库插件。
 
 完整的请求参数、返回字段、错误码、调用示例与迁移流程见 **[HTTP API 使用与参考](docs/api.md)**。`GET /openapi.json` 返回当前部署的 OpenAPI 3.1 定义，包含全部 22 个操作的模型、示例与鉴权信息，批量查询上限随部署配置变化，可导入支持 OpenAPI 3.1 的接口工具。
 
@@ -90,6 +90,14 @@ bun run cli sync-archive --file tests/fixtures/subject.jsonl --as-of 2026-01-01T
 ```
 
 健康检查：`GET /health/live`、`GET /health/ready`。
+
+### 初始迁移与后续升级
+
+发布前的多次结构调整已合并到各方言的 `0001_initial.sql`，其中直接包含未命中统计、`planned` 默认值和 `(subject_id, name)` 唯一索引。空库只执行这一份初始迁移，不再先建旧表再逐步修改或清理历史数据。
+
+当前基线仍为 **schema 第 4 版**，避免让已导入数据的当前开发库失效；初始迁移文件沿用原名称，使已有 D1 的迁移登记继续有效。已是第 4 版的 Node/CLI 数据库不会重复执行初始 SQL。旧开发库第 1～3 版不再提供自动升级；如需保留其中数据，先用匹配的旧版服务导出业务备份，再恢复到新建并初始化的目标库，不要只改版本数字。
+
+`db:migrate`、`db:migrate:worker`、`wrangler d1 migrations apply` 和启动时的自动迁移继续保留。后续变更在两个迁移目录分别增加同名 SQL（下一版可用 `0005_说明.sql`），并在 `src/adapters/storage/schema.ts` 的 `MIGRATIONS` 中登记目标版本和文件名、更新 `SCHEMA_VERSION`；Node/CLI 按目标版本执行尚未应用的迁移，D1 继续由 Wrangler 管理。正式发布后不再改写已发布迁移文件。
 
 ## Cloudflare Worker 部署
 
@@ -571,7 +579,7 @@ Content-Type: application/json
 
 Node/CLI 使用 `.env`，修改后重启；Docker Compose 透传同名变量。Worker 在 `wrangler.jsonc` 的 `vars.ALIAS_MISS_STATS_ENABLED` 中配置，重新部署生效。
 
-当前 schema 第 4 版：`0002_alias_miss_stats.sql` 创建统计表，`0003_alias_miss_planned.sql` 增加处理计划，`0004_alias_name_unique.sql` 增加 `(subject_id, name)` 唯一索引。第 4 版迁移会合并旧库中同名的官方和手动记录，保留手动记录及其 ID、时间和上游刷新保护，其余别名、条目和统计保留。Node/CLI 启动时自动按顺序迁移 SQLite/PostgreSQL。Worker 部署前先执行 `bunx wrangler d1 migrations apply DB --remote`（本地使用 `--local`），再部署新版本。未命中统计和处理计划没有对应条目，属于环境统计数据，不包含在现有按条目导出的业务备份中；`stats-prune` 仍只清理每日访问统计。
+未命中统计、处理计划与同条目名称唯一约束已包含在合并后的初始迁移中。Node/CLI 启动时自动执行需要的迁移；Worker 部署前执行 `bunx wrangler d1 migrations apply DB --remote`（本地使用 `--local`）。未命中统计和处理计划没有对应条目，属于环境统计数据，不包含在现有按条目导出的业务备份中；`stats-prune` 仍只清理每日访问统计。
 
 ### 处理未命中别名
 
@@ -606,7 +614,7 @@ bun run cli resolve-alias-misses --auto --api-url https://your-api.example.com -
 - 管道 / 非终端保留行式交互：`1`、`2` 等选择候选序号，`-1` 标为无计划，`0`、`s` 或空行跳过，`q` 或 EOF 结束。无候选时还可以直接输入新的搜索名称。
 - 候选与提示输出到 stderr，终端显示中文汇总；使用 `--json` 或重定向 stdout 获得 JSON 汇总及 `results` 中的别名、处理状态和所选条目 ID。标为无计划的结果为 `unplanned`，无候选时跳过记为 `no_candidates`。`--log-level silent` 仍保留交互提示，等待输入时暂停进度心跳。
 - 远程模式由服务端使用 `BANGUMI_USER_AGENT` 和可选的 `BANGUMI_ACCESS_TOKEN` 完成搜索和详情获取；Worker Token 仍使用 Secret。本机无需 Bangumi Token。直接连接数据库时使用本机同名配置。
-- 远程服务需先完成 schema 第 4 版迁移并更新服务端，才能应用跨来源别名唯一规则。受管理员鉴权保护的 `POST /api/v1/admin/subjects/search` 正文为 `{"keyword":"动画别名","limit":10}`，返回 `{"total":2,"candidates":[...]}`。此接口只搜索；导入继续使用已有的单条目同步和手动别名接口。
+- 远程服务需使用当前完整数据库结构和服务端，才能应用跨来源别名唯一规则。受管理员鉴权保护的 `POST /api/v1/admin/subjects/search` 正文为 `{"keyword":"动画别名","limit":10}`，返回 `{"total":2,"candidates":[...]}`。此接口只搜索；导入继续使用已有的单条目同步和手动别名接口。
 - 搜索或写入失败会停止命令并输出当前别名、已完成数量及所选条目 ID。条目同步与手动别名添加是两次操作；若同步已完成但添加别名失败，可用 `bun run cli alias-add --id 所选ID --name "别名"` 补全（远程目标追加相同的 `--api-url`）。成功绑定的名称会自动从未命中列表清理，再次运行处理剩余记录。
 
 ## 备份与迁移
@@ -630,7 +638,7 @@ bun run cli import --file backup.jsonl
 bun run cli import --file backup.jsonl --api-url https://your-worker.example.com
 ```
 
-恢复前会完整验证文件，包括重复条目 ID、重复别名 ID、同条目的重复名称与来源、重复统计日期，以及远程模式的单条请求体大小。兼容旧版 `version:1` 备份中同名的不同来源别名：按迁移规则保留手动记录并去重，检查点续跑也按合并后的内容核对。校验通过后逐条目原子恢复。
+恢复前会完整验证文件，包括重复条目 ID、重复别名 ID、同条目的重复名称与来源、重复统计日期，以及远程模式的单条请求体大小。兼容旧版 `version:1` 备份中同名的不同来源别名：保留手动记录并去重，检查点续跑也按合并后的内容核对。校验通过后逐条目原子恢复。
 
 首次恢复要求空数据库，并按备份文件 SHA-256 在目标数据库的 `sync_state` 中建立恢复检查点，每完成一条就更新。中途失败或取消后，保持**相同备份文件和目标数据库，重新执行原命令**即可续跑，无需手动指定起始位置。续跑会逐条核对已写入数据，内容完全一致才跳过，因此写入成功但响应或检查点保存失败也能恢复；已有内容冲突或检查点对应条目缺失时会报错，不覆盖数据。完成后重复运行同样安全，摘要分别显示本次恢复数、已核对并跳过数和总数。
 

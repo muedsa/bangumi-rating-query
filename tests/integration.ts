@@ -36,7 +36,9 @@ import './backup-recovery.ts';
 import './openapi.ts';
 
 const token = 'integration-test-token-with-32-characters';
-const migration = MIGRATIONS.map((file) => readFileSync(`migrations/${file}`, 'utf8')).join('\n');
+const migration = MIGRATIONS.map(({ file }) => readFileSync(`migrations/${file}`, 'utf8')).join(
+  '\n',
+);
 const asOf = Date.parse('2026-01-01T00:00:00Z');
 
 test('Archive dry-run 默认全量统计，不请求 API、不创建数据库或错误文件', async () => {

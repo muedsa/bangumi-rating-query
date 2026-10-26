@@ -163,6 +163,8 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
 
 `schemaVersion` 是数据库结构版本，与 API 版本和备份 `version` 独立。`statisticsEnabled` 对应 `STATS_ENABLED`，不表示未命中统计开关。结构版本不匹配返回 `503 NOT_READY`；缺表、连接故障通常返回 `503 SERVICE_UNAVAILABLE`。
 
+当前初始迁移已合并并直接建立第 4 版结构，迁移框架仍保留以供后续升级。发布前第 1～3 版旧结构不再自动升级，需要通过旧版服务导出业务备份后恢复到新库；具体流程见 [README](../README.md#初始迁移与后续升级)。
+
 ### GET /openapi.json
 
 无参数、无正文。返回完整规范对象，顶层包括 `openapi`、`info`、`servers`、`tags`、`paths`、`components`。`components.schemas` 内包含全部请求和返回模型；每个操作有唯一 `operationId` 和中文说明。`BatchRequest.items.maxItems` 与当前 `MAX_BATCH_SIZE` 一致。

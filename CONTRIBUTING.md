@@ -28,6 +28,19 @@ bun run check
 
 请随依赖变更提交 `package.json` 和 `bun.lock`，不要手动修改锁文件。GitHub Actions 会运行同一套检查。
 
+## 数据库迁移
+
+迁移目录和框架保留。发布前历史步骤已合并到 `migrations/0001_initial.sql` 和 `migrations/postgres/0001_initial.sql`，两者直接创建当前第 4 版完整结构；版本标识及文件名保留以兼容现有完整数据库和 D1 迁移记录。
+
+正式发布后新增变更应追加 SQL，不改写已发布文件：
+
+1. 在两个目录分别添加同名迁移文件，例如下一版 `0005_example.sql`。
+2. 在 `src/adapters/storage/schema.ts` 的 `MIGRATIONS` 中按版本升序追加 `{ version: 5, file: '0005_example.sql' }`，并更新 `SCHEMA_VERSION`。
+3. 每份迁移末尾将 `schema_version` 从前一版本更新为目标版本；不要按迁移数组下标推算数据库版本，初始基线已合并了多个历史版本。
+4. 为新增迁移补充已有数据升级、重复执行和失败回滚测试；验证 SQLite、D1、PostgreSQL 均保留业务数据。
+
+当前 `tests/migrations.ts` 验证合并后的空库初始化、约束与默认值、重复启动不改写数据、失败回滚以及发布前旧结构拒绝升级；未来追加的升级用例继续放在此文件。PostgreSQL 的事务锁和 SQLite 的写锁仍保护并发启动，D1 继续通过 Wrangler 应用迁移。
+
 ## 提交与 Pull Request
 
 - 提交信息遵循 Conventional Commits，描述尽量使用中文，例如 `fix(cli): 修复远程导入检查点日志`。

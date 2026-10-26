@@ -1,6 +1,6 @@
+-- SQLite / Cloudflare D1 合并后的初始迁移，直接建立第 4 版完整结构。
+-- 后续版本继续追加独立迁移，不再保留发布前的增量步骤。
 PRAGMA foreign_keys = ON;
-CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
-INSERT OR IGNORE INTO schema_version VALUES (1);
 
 CREATE TABLE subjects (
   id INTEGER PRIMARY KEY,
@@ -19,9 +19,9 @@ CREATE TABLE subject_aliases (
   normalized_name TEXT NOT NULL,
   source TEXT NOT NULL CHECK (source IN ('bangumi', 'manual')),
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
-  UNIQUE(subject_id, name, source)
+  updated_at INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX aliases_subject_name ON subject_aliases(subject_id, name);
 CREATE INDEX aliases_normalized ON subject_aliases(normalized_name, subject_id);
 CREATE INDEX aliases_subject ON subject_aliases(subject_id);
 
@@ -51,3 +51,17 @@ CREATE TABLE sync_state (
   value TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE alias_miss_stats (
+  normalized_name TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  miss_count INTEGER NOT NULL CHECK (miss_count > 0),
+  first_missed_at INTEGER NOT NULL,
+  last_missed_at INTEGER NOT NULL,
+  planned INTEGER NOT NULL DEFAULT 1 CHECK (planned IN (0, 1))
+);
+CREATE INDEX alias_misses_count ON alias_miss_stats(miss_count DESC, last_missed_at DESC, normalized_name);
+CREATE INDEX alias_misses_planned_count ON alias_miss_stats(planned, miss_count DESC, last_missed_at DESC, normalized_name);
+
+-- 所有业务表创建成功后才写入就绪标识。
+CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+INSERT INTO schema_version VALUES (4);
