@@ -97,9 +97,10 @@ test('搜索未配置上游时返回明确错误，OpenAPI 声明管理员鉴权
   const spec = (await (await app.request('/openapi.json')).json()) as any;
   const operation = spec.paths['/api/v1/admin/subjects/search'].post;
   expect(operation.security).toEqual([{ bearerAuth: [] }]);
-  expect(operation.requestBody.content['application/json'].schema.properties.limit.maximum).toBe(
-    50,
+  expect(operation.requestBody.content['application/json'].schema.$ref).toBe(
+    '#/components/schemas/SearchRequest',
   );
+  expect(spec.components.schemas.SearchRequest.properties.limit.maximum).toBe(50);
 });
 
 test('Bangumi 重定向响应不被跟随或重试', async () => {

@@ -28,10 +28,12 @@ import { backupFixture } from './helpers/backup.ts';
 import { parseBackupRecord } from '../src/core/backup.ts';
 import { normalizeName } from '../src/core/matching.ts';
 import { postgresTestDatabase } from './helpers/postgres.ts';
+import { assertResponse, document as openApiDocument } from './helpers/openapi.ts';
 import './postgres.ts';
 import './migrations.ts';
 import './cli-ui.ts';
 import './backup-recovery.ts';
+import './openapi.ts';
 
 const token = 'integration-test-token-with-32-characters';
 const migration = MIGRATIONS.map((file) => readFileSync(`migrations/${file}`, 'utf8')).join('\n');
@@ -1952,8 +1954,8 @@ for (const kind of ['node', 'worker', 'postgres'] as const) {
   for (const enabled of [false, true])
     test(`${kind}: 真实 HTTP/存储契约，统计 ${enabled}`, async () => {
       const target = await runtime(kind, enabled);
-      const request = (path: string, method = 'GET', body?: unknown, auth = true) =>
-        target.fetch(path, {
+      const request = async (path: string, method = 'GET', body?: unknown, auth = true) => {
+        const response = await target.fetch(path, {
           method,
           headers: {
             'Content-Type': 'application/json',
@@ -1961,6 +1963,15 @@ for (const kind of ['node', 'worker', 'postgres'] as const) {
           },
           body: body === undefined ? undefined : JSON.stringify(body),
         });
+        assertResponse(
+          openApiDocument,
+          path,
+          method,
+          response.status,
+          await response.clone().json(),
+        );
+        return response;
+      };
       const json = async (path: string, method = 'GET', body?: unknown) => {
         const response = await request(path, method, body);
         assert.equal(response.status, 200, await response.clone().text());
@@ -1971,11 +1982,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const) {
         assert.equal((await json('/health/ready')).statisticsEnabled, enabled);
         const spec = await json('/openapi.json');
         assert.equal(spec.openapi, '3.1.0');
-        assert.equal(
-          spec.paths['/api/v1/ratings/batch'].post.requestBody.content['application/json'].schema
-            .properties.items.maxItems,
-          20,
-        );
+        assert.equal(spec.components.schemas.BatchRequest.properties.items.maxItems, 20);
         assert.equal(
           (await request('/api/v1/admin/import', 'POST', fixture(100, 'Test'), false)).status,
           401,

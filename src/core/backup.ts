@@ -4,21 +4,34 @@ import { normalizeName } from './matching.ts';
 
 export const backupSchema = z
   .object({
-    version: z.literal(1),
-    subject: subjectSchema,
-    aliases: z.array(aliasSchema).max(250),
-    rating: ratingSchema.nullable(),
+    version: z.literal(1).describe('业务备份格式版本，固定为 1；与数据库 schema 版本不同。'),
+    subject: subjectSchema.describe('完整条目记录。'),
+    aliases: z
+      .array(aliasSchema)
+      .max(250)
+      .describe(
+        '完整别名，含来源、ID 和时间；同条目 ID、归一化键必须一致。旧版跨来源同名记录恢复时保留 manual。',
+      ),
+    rating: ratingSchema.nullable().describe('完整评分；null 表示备份中没有评分记录。'),
     usage: z
-      .object({ lastAccessedAt: timestamp, totalHits: z.number().int().nonnegative() })
-      .nullable(),
+      .object({
+        lastAccessedAt: timestamp.describe('最近唯一命中时间（Unix 毫秒）。'),
+        totalHits: z.number().int().nonnegative().describe('累计命中次数。'),
+      })
+      .nullable()
+      .describe('累计访问统计；未记录时为 null。'),
     daily: z
       .array(
         z.object({
-          day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-          hits: z.number().int().nonnegative(),
+          day: z
+            .string()
+            .regex(/^\d{4}-\d{2}-\d{2}$/)
+            .describe('UTC 统计日期 YYYY-MM-DD；同条目不得重复。'),
+          hits: z.number().int().nonnegative().describe('当日命中次数。'),
         }),
       )
-      .max(3660),
+      .max(3660)
+      .describe('每日访问统计；没有统计时为空数组。'),
   })
   .superRefine((r, ctx) => {
     if (new Set(r.aliases.map((alias) => alias.id)).size !== r.aliases.length)

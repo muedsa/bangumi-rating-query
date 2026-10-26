@@ -4,25 +4,32 @@ import type { SubjectSearchSource } from './ports.ts';
 
 export const MAX_SEARCH_CANDIDATES = 50;
 export const subjectSearchRequestSchema = z.object({
-  keyword: nameSchema,
-  limit: z.number().int().min(1).max(MAX_SEARCH_CANDIDATES).default(10),
+  keyword: nameSchema.describe('搜索关键词，去首尾空白后为 1～300 字符。'),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_SEARCH_CANDIDATES)
+    .default(10)
+    .describe('最多返回的候选数；仅获取第一页，默认 10，最大 50。'),
 });
 export const subjectSearchResultSchema = z.object({
-  total: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative().describe('上游返回的总匹配数，可能大于本次候选数。'),
   candidates: z
     .array(
       z.object({
         id: positiveId,
-        name: nameSchema,
-        nameCn: z.string().max(300),
-        airDate: z.string().nullable(),
-        platform: z.string().max(100),
-        summary: z.string().max(500),
-        score: z.number().min(0).max(10).nullable(),
-        votes: z.number().int().nonnegative(),
+        name: nameSchema.describe('候选原名。'),
+        nameCn: z.string().max(300).describe('候选中文名，缺失为空字符串。'),
+        airDate: z.string().nullable().describe('首播日期；未知为 null。'),
+        platform: z.string().max(100).describe('作品形式；未知为空字符串。'),
+        summary: z.string().max(500).describe('简介，截取最多 500 字符；缺失为空字符串。'),
+        score: z.number().min(0).max(10).nullable().describe('评分；未评分为 null。'),
+        votes: z.number().int().nonnegative().describe('评分人数。'),
       }),
     )
-    .max(50),
+    .max(50)
+    .describe('按上游匹配度排列的动画候选，按条目 ID 去重；无结果为空数组。'),
 });
 export type SubjectSearchResult = z.infer<typeof subjectSearchResultSchema>;
 export type SubjectSearchCandidate = SubjectSearchResult['candidates'][number];

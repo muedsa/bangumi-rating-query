@@ -9,6 +9,8 @@
 
 两种入口共享查询业务、参数校验和 JSON 契约。业务层不依赖 Cloudflare 或 Node.js；数据库差异集中在适配器中。Drizzle 用于构造参数化 SQL，D1 与 SQLite 共用迁移 SQL，PostgreSQL 使用 `migrations/postgres` 中的独立迁移。Node 的 SQLite 使用内置 `node:sqlite`，PostgreSQL 使用 Postgres.js 连接池，均无需编译原生数据库插件。
 
+完整的请求参数、返回字段、错误码、调用示例与迁移流程见 **[HTTP API 使用与参考](docs/api.md)**。`GET /openapi.json` 返回当前部署的 OpenAPI 3.1 定义，包含全部 22 个操作的模型、示例与鉴权信息，批量查询上限随部署配置变化，可导入支持 OpenAPI 3.1 的接口工具。
+
 ## 首版功能
 
 - 按多个名称或 Bangumi ID 批量查询，保留输入顺序，默认每批最多 20 条。

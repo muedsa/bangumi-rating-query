@@ -33,8 +33,26 @@ bun run check
 - 提交信息遵循 Conventional Commits，描述尽量使用中文，例如 `fix(cli): 修复远程导入检查点日志`。
 - PR 说明具体问题、修改后的行为和实际执行的验证；文档尽量使用中文。
 - 修改共享业务或 SQL 时，应确认 SQLite、D1、PostgreSQL 三种存储均适用；方言差异集中在存储适配器，PostgreSQL 迁移独立放在 `migrations/postgres`。修复缺陷时添加能复现问题的回归测试。
-- 修改 API、配置或 CLI 参数时，同步更新 README；涉及接口契约时也应更新 OpenAPI。
+- 修改 API、配置或 CLI 参数时，同步更新 README；涉及接口契约时还需更新 [HTTP API 文档](docs/api.md) 和 OpenAPI。
 - 不提交真实 Token、`.env`、`.dev.vars`、数据库、Archive 文件、备份或运行日志。使用虚构数据制作最小复现；提交日志前移除凭证和个人信息。
+
+## API 契约维护
+
+请求字段优先复用 `src/core` 的业务模型或 `src/http/contracts.ts`，路由和 OpenAPI 共用校验约束。响应结构集中在 `contracts.ts`；上游搜索、日历和备份使用相应核心模型。不要以任意对象替代已知返回字段。
+
+`src/http/openapi.ts` 声明路由、参数、鉴权、operationId 及响应。请求模型用 Zod 的 `io: 'input'` 导出，响应用 `io: 'output'`，避免带默认值的请求字段被误标为必填。Zod refinement 不一定能导出：能用 JSON Schema 表达的约束应显式补充，其他跨字段规则应在操作说明和文档中写清楚，并保留服务端校验测试。
+
+错误目录位于 `src/http/openapi-errors.ts`，虚构示例位于 `src/http/openapi-examples.ts`。每个操作只列出其实际可能返回的业务错误，公共中间件错误统一维护。新增接口应补充参数、默认值、可空语义、时间单位、成功和失败结构，以及重试后的副作用；不要将 200 的 `not_found`、`ambiguous`、`partial` 当作 HTTP 错误。
+
+`tests/unit/openapi.test.ts` 检查路由覆盖、模型引用、示例、默认值及动态批量上限；`tests/openapi.ts` 使用内存 SQLite 和模拟上游，验证全部操作的真实请求/响应以及关键错误分支。后者已包含在 `bun run test:integration` 中。定向运行：
+
+```sh
+bun test tests/unit/openapi.test.ts
+bun build tests/openapi.ts --target=node --packages=external --outfile=.cache/openapi.mjs
+node --test .cache/openapi.mjs
+```
+
+完成定向检查后运行 `bun run check`，同时验证 Node、Worker 与 PostgreSQL 适配器；测试不得依赖生产 Token 或实际 Bangumi 请求。
 
 ## 许可
 

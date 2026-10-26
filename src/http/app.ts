@@ -3,7 +3,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { routePath } from 'hono/route';
 import type { Context } from 'hono';
 import { z, ZodError } from 'zod';
-import { AppError, batchSchema, importSchema, nameSchema, positiveId } from '../core/models.ts';
+import { AppError, batchSchema, importSchema, positiveId } from '../core/models.ts';
 import { QueryService } from '../core/query-service.ts';
 import { normalizeName } from '../core/matching.ts';
 import { seasonAliasNames } from '../core/season-aliases.ts';
@@ -19,6 +19,12 @@ import { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import { backupSchema } from '../core/backup.ts';
 import type { Config } from '../config.ts';
 import { getOpenApi } from './openapi.ts';
+import {
+  aliasBodySchema,
+  aliasMissPlanSchema,
+  pruneBodySchema,
+  syncStateBodySchema,
+} from './contracts.ts';
 import { createServerErrorLogger, requestErrorContext } from '../observability/errors.ts';
 import { SCHEMA_VERSION } from '../adapters/storage/schema.ts';
 
@@ -141,7 +147,6 @@ export function createApp(
       throw new AppError(401, 'UNAUTHORIZED', '管理凭证无效');
     await next();
   });
-  const aliasBody = z.object({ name: nameSchema });
   app.post('/api/v1/admin/subjects/search', async (c) => {
     const { keyword, limit } = subjectSearchRequestSchema.parse(await c.req.json());
     return c.json(await searchSubjects(dependencies.searchSource, keyword, limit));
@@ -153,7 +158,7 @@ export function createApp(
   });
   app.post('/api/v1/admin/subjects/:id/aliases', async (c) => {
     const id = positiveId.parse(Number(c.req.param('id')));
-    const { name } = aliasBody.parse(await c.req.json());
+    const { name } = aliasBodySchema.parse(await c.req.json());
     if (!(await repo.findSubjects([id])).length)
       throw new AppError(404, 'SUBJECT_NOT_FOUND', '请先导入该条目');
     const alias = await repo.addManualAlias(id, name, Date.now());
@@ -166,9 +171,9 @@ export function createApp(
     ];
     return c.json({ alias, conflictingSubjectIds: conflicts });
   });
-  app.patch('/api/v1/admin/aliases/:id', async (c) => {
-    const { name } = aliasBody.parse(await c.req.json());
-    const alias = await repo.updateManualAlias(c.req.param('id'), name, Date.now());
+  app.patch('/api/v1/admin/aliases/:aliasId', async (c) => {
+    const { name } = aliasBodySchema.parse(await c.req.json());
+    const alias = await repo.updateManualAlias(c.req.param('aliasId'), name, Date.now());
     if (!alias) throw new AppError(404, 'ALIAS_NOT_FOUND', '手动别名不存在');
     return c.json({
       alias,
@@ -181,8 +186,8 @@ export function createApp(
       ],
     });
   });
-  app.delete('/api/v1/admin/aliases/:id', async (c) => {
-    if (!(await repo.deleteManualAlias(c.req.param('id'))))
+  app.delete('/api/v1/admin/aliases/:aliasId', async (c) => {
+    if (!(await repo.deleteManualAlias(c.req.param('aliasId'))))
       throw new AppError(404, 'ALIAS_NOT_FOUND', '手动别名不存在');
     return c.json({ deleted: true });
   });
@@ -225,17 +230,13 @@ export function createApp(
     });
   });
   app.patch('/api/v1/admin/stats/alias-misses', async (c) => {
-    const { name, planned } = z
-      .object({ name: nameSchema, planned: z.boolean() })
-      .parse(await c.req.json());
+    const { name, planned } = aliasMissPlanSchema.parse(await c.req.json());
     const alias = await repo.setAliasMissPlanned(name, planned);
     if (!alias) throw new AppError(404, 'ALIAS_MISS_NOT_FOUND', '未命中别名记录不存在');
     return c.json({ alias });
   });
   app.post('/api/v1/admin/stats/prune', async (c) => {
-    const { days } = z
-      .object({ days: z.number().int().min(30).max(3650).default(90) })
-      .parse(await c.req.json());
+    const { days } = pruneBodySchema.parse(await c.req.json());
     return c.json(await repo.pruneDaily(days));
   });
   app.get('/api/v1/admin/retention', async (c) => {
@@ -251,7 +252,7 @@ export function createApp(
     c.json({ value: await repo.getState(c.req.param('key')) }),
   );
   app.put('/api/v1/admin/sync-state/:key', async (c) => {
-    const { value } = z.object({ value: z.string().max(10000) }).parse(await c.req.json());
+    const { value } = syncStateBodySchema.parse(await c.req.json());
     await repo.setState(c.req.param('key'), value);
     return c.json({ saved: true });
   });
