@@ -7,7 +7,7 @@
   "upload_source_maps": true,
   "vars": {
     "BANGUMI_USER_AGENT": "muedsa/bangumi-rating-query (https://github.com/muedsa/bangumi-rating-query)",
-    "STATS_ENABLED": "false",
+    "STATS_ENABLED": "true",
     "ALIAS_MISS_STATS_ENABLED": "true",
     "MAX_BATCH_SIZE": "20",
     "RATING_TTL_HOURS": "24",
