@@ -2,7 +2,7 @@
 name: review-alias-misses
 description: 人工审核并处理 bangumi-rating-query 服务的未命中别名。按参数拉取待处理别名、逐个调用搜索接口、标注最可能命中的条目，经用户确认后通过管理接口导入条目并绑定别名、跳过、标为无计划或换词重搜。Use when the user asks to 处理/审核未处理别名、未命中别名、review alias misses, or manually resolve unknown aliases against this service. 不用于调用 CLI 的 resolve-alias-misses。
 user-invocable: true
-argument-hint: "[--limit N] [--search-limit N] [--request-retries N] [--api-url URL]"
+argument-hint: '[--limit N] [--search-limit N] [--request-retries N] [--api-url URL]'
 ---
 
 # 人工审核未命中别名
@@ -15,12 +15,12 @@ argument-hint: "[--limit N] [--search-limit N] [--request-retries N] [--api-url 
 
 ## 参数
 
-| 参数 | 默认 | 说明 |
-| --- | --- | --- |
-| `--api-url <URL>` | `$BANGUMI_API_URL` | 服务根地址,不带 `/api/v1`,去掉尾部 `/`;必须是 HTTPS,本机可用 HTTP |
-| `--limit <N>` | `10` | 本轮审核多少个别名,正整数;服务端默认只返回 100 条 |
-| `--search-limit <N>` | `10` | 每个别名取多少候选,1～50,只取上游第一页 |
-| `--request-retries <N>` | `5` | 可重试错误的次数,非负整数,0 关闭;默认 5 |
+| 参数                    | 默认               | 说明                                                              |
+| ----------------------- | ------------------ | ----------------------------------------------------------------- |
+| `--api-url <URL>`       | `$BANGUMI_API_URL` | 服务根地址,不带 `/api/v1`,去掉尾部 `/`;必须是 HTTPS,本机可用 HTTP |
+| `--limit <N>`           | `10`               | 本轮审核多少个别名,正整数;服务端默认只返回 100 条                 |
+| `--search-limit <N>`    | `10`               | 每个别名取多少候选,1～50,只取上游第一页                           |
+| `--request-retries <N>` | `5`                | 可重试错误的次数,非负整数,0 关闭;默认 5                           |
 
 参数缺失时先问用户,不要猜服务地址。取值先校验:`--limit` 为正整数,`--search-limit` 为 1～50,`--request-retries` 为非负整数,超出范围直接报错不发请求;`--api-url` 不能包含用户名/密码,非本机地址必须是 HTTPS。下文 `$API` 指解析后的服务根地址。
 
@@ -45,16 +45,16 @@ argument-hint: "[--limit N] [--search-limit N] [--request-retries N] [--api-url 
 
 ## 接口
 
-| 方法 | 路径 | 正文 | 响应要点 |
-| --- | --- | --- | --- |
-| GET | `/api/v1/admin/stats/alias-misses?planned=true&limit=N` | 无 | `{enabled, aliases:[{name,normalizedName,missCount,firstMissedAt,lastMissedAt,planned}]}` |
-| POST | `/api/v1/admin/subjects/search` | `{keyword, limit}` | `{total, candidates:[{id,name,nameCn,airDate,platform,summary,score,votes}]}`;limit 1～50,只取第一页 |
-| POST | `/api/v1/admin/subjects/{id}/sync` | 无 | `{imported:<id>}`,导入详情、评分、上游别名 |
-| POST | `/api/v1/admin/subjects/{id}/aliases` | `{name}` | `{alias:{id,subjectId,name,source,...}, conflictingSubjectIds:[]}` |
-| PATCH | `/api/v1/admin/stats/alias-misses` | `{name, planned}` | `{alias:{...}}`,按归一化名称定位 |
-| POST | `/api/v1/ratings/batch` | `{items:[{inputId,names}]}` | 公开接口;`matched` 项含 `subject`、`matchReason`、`matchedAliases`;用 `status`、`subject.id` 验证 |
-| GET | `/api/v1/subjects/{id}/aliases` | 无 | 公开接口,返回 `{aliases:[...]}`,核对实际保存的别名 |
-| DELETE | `/api/v1/admin/aliases/{aliasId}` | 无 | 仅手动来源;仅用户明确要求时用 |
+| 方法   | 路径                                                    | 正文                        | 响应要点                                                                                             |
+| ------ | ------------------------------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------- |
+| GET    | `/api/v1/admin/stats/alias-misses?planned=true&limit=N` | 无                          | `{enabled, aliases:[{name,normalizedName,missCount,firstMissedAt,lastMissedAt,planned}]}`            |
+| POST   | `/api/v1/admin/subjects/search`                         | `{keyword, limit}`          | `{total, candidates:[{id,name,nameCn,airDate,platform,summary,score,votes}]}`;limit 1～50,只取第一页 |
+| POST   | `/api/v1/admin/subjects/{id}/sync`                      | 无                          | `{imported:<id>}`,导入详情、评分、上游别名                                                           |
+| POST   | `/api/v1/admin/subjects/{id}/aliases`                   | `{name}`                    | `{alias:{id,subjectId,name,source,...}, conflictingSubjectIds:[]}`                                   |
+| PATCH  | `/api/v1/admin/stats/alias-misses`                      | `{name, planned}`           | `{alias:{...}}`,按归一化名称定位                                                                     |
+| POST   | `/api/v1/ratings/batch`                                 | `{items:[{inputId,names}]}` | 公开接口;`matched` 项含 `subject`、`matchReason`、`matchedAliases`;用 `status`、`subject.id` 验证    |
+| GET    | `/api/v1/subjects/{id}/aliases`                         | 无                          | 公开接口,返回 `{aliases:[...]}`,核对实际保存的别名                                                   |
+| DELETE | `/api/v1/admin/aliases/{aliasId}`                       | 无                          | 仅手动来源;仅用户明确要求时用                                                                        |
 
 `/api/v1/admin/*` 需要 `Authorization: Bearer $ADMIN_TOKEN`;带正文的请求加 `Content-Type: application/json`。每次请求都要同时保留 HTTP 状态码和响应体,失败时读取 `error.code`,可能时记录 `X-Request-ID`。每个请求设置 60 秒左右超时,超时按网络错误处理。
 
@@ -64,11 +64,11 @@ argument-hint: "[--limit N] [--search-limit N] [--request-retries N] [--api-url 
 
 唯一硬性要求是正文的 UTF-8 编码。别名几乎都是中文/日文,而 Windows 上的 shell 可能按本地代码页(GBK/CP936)把命令行参数转码,症状是服务端存下 `����`、PATCH 返回 404、batch 却"匹配"到乱码别名,全程不报错。
 
-| 工具 | 安全做法 | 避免 |
-| --- | --- | --- |
-| curl | 正文写入 UTF-8 文件后用 `--data-binary @文件`;或 `--json @文件` | `--data '{"name":"中文"}'` 内联 |
-| Node/Bun | `fetch(url, { body: JSON.stringify(obj) })` | 从 shell 变量拼接后再转码 |
-| Python | `requests` 的 `json=`;或 `json.dumps(...).encode('utf-8')` | 依赖默认 locale 编码 |
+| 工具       | 安全做法                                                          | 避免                                                          |
+| ---------- | ----------------------------------------------------------------- | ------------------------------------------------------------- |
+| curl       | 正文写入 UTF-8 文件后用 `--data-binary @文件`;或 `--json @文件`   | `--data '{"name":"中文"}'` 内联                               |
+| Node/Bun   | `fetch(url, { body: JSON.stringify(obj) })`                       | 从 shell 变量拼接后再转码                                     |
+| Python     | `requests` 的 `json=`;或 `json.dumps(...).encode('utf-8')`        | 依赖默认 locale 编码                                          |
 | PowerShell | `[Text.Encoding]::UTF8.GetBytes($json)`,或 UTF-8 文件 + `-InFile` | 中文直接写在 `-Body '...'`(5.1 可能按 ISO-8859-1/UTF-16 发送) |
 
 用文件时:用 Write 工具写 JSON(UTF-8、无 BOM),名称按 JSON 转义(`\` → `\\`,`"` → `\"`,换行/制表符等控制字符转成 `\n`、`\t`、`\u00XX`);不要用 `echo`/`printf`/heredoc 拼接正文。临时文件放 `.cache/review-alias-misses/`(路径相对当前工作目录,不在项目根时用绝对路径),按用途分开(`search.json` / `alias.json` / `plan.json` / `verify.json`),本轮结束删除。
@@ -269,7 +269,7 @@ stop                 # 结束本批,不再写库
    - 保留:记录冲突并继续后续动作;该名称以后查询会返回 `ambiguous`。验证阶段遇到同一个已裁决为“保留”的冲突,不要重复询问。
    - 撤销:仅 `source=manual` 可用,`DELETE /api/v1/admin/aliases/{alias.id}`;`bangumi` 来源无法撤销。重试后仍返回 404 时,先 `GET` 别名列表:目标已不存在就视为删除成功。撤销后未命中记录已被清掉且无法重建,该名称只会在下次真实查询未命中时重新出现。
    - 换绑:先撤销本条(仅 manual),再按 `bind` / `bind!` 流程绑定到用户指定条目;若本条是 `bangumi` 来源,换绑会让两个条目共享该别名,只能作为明确接受歧义的选择。撤销成功但新绑定失败时,名称处于未绑定状态,要如实报告。
-   裁决后再继续,并在汇总里记录冲突条目。
+     裁决后再继续,并在汇总里记录冲突条目。
 
 补充:添加带季数的名称会按服务端规则补充互补写法(`第2季` ↔ `第二季`),也可能影响其他条目的季数别名;`conflictingSubjectIds` 也检查这些衍生名称,顺序不保证。撤销只删除这一条手动别名,不会回滚同次写入的季数衍生别名。冲突检查发生在写入之后,该步若报 `TOO_MANY_CANDIDATES` 或内部错误,别名可能已经保存,先 `GET` 核对再重试。
 
