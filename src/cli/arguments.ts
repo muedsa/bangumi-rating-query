@@ -8,7 +8,7 @@ export const commands = [
   ],
   [
     'sync-archive',
-    '导入 Archive / 继续下一批',
+    '倒序导入 Archive / 继续下一批',
     [
       'file',
       'as-of',
@@ -63,7 +63,7 @@ const flags = [
   ['--limit <数量>', '本批处理上限；Archive 默认 1000，别名默认 20'],
   ['--search-limit <数量>', '每个名称的候选上限，默认 10，范围 1～50'],
   ['--auto', '自动处理唯一的原名或中文名完全相同的候选，其余跳过，不等待输入'],
-  ['--checkpoint-interval <行数>', '检查点保存间隔，默认 20 行'],
+  ['--checkpoint-interval <行数>', '检查点保存间隔，按从末尾已扫描行数计算，默认 20 行'],
   ['--days <天数>', '统计天数，默认 90'],
   ['--skip-invalid', '跳过解析失败的 Archive 行'],
   ['--dry-run', '仅解析 Archive，不连接存储或保存检查点'],

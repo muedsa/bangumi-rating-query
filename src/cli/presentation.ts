@@ -9,6 +9,7 @@ import { display, terminalOutput } from './display.ts';
 const phases: Record<string, string> = {
   opening_storage: '连接存储',
   archive_hash: '计算文件 SHA-256',
+  archive_index: '统计文件行数',
   checkpoint_read: '读取检查点',
   archive_scan: '扫描 Archive',
   archive_parse: '解析条目',
@@ -32,6 +33,7 @@ const phases: Record<string, string> = {
 };
 export function formatProgress(data: LogDetails) {
   const parts = [phases[String(data.phase)] ?? '处理中'];
+  if (data.direction === 'reverse') parts.push('倒序');
   if (data.line !== undefined) parts.push(`第 ${data.line} 行`);
   if (data.dryRun && data.parsed !== undefined) parts.push(`已解析 ${data.parsed}`);
   else if (data.imported !== undefined) parts.push(`已导入 ${data.imported}`);
@@ -65,6 +67,17 @@ export function resultLines(command: CommandName, result: unknown): string[] {
             : '本批已完成，可继续下一批',
       `${r.dryRun ? `解析 ${r.parsed}` : `导入 ${r.imported}`} · 本批跳过 ${r.skipped} · 累计跳过 ${r.skippedTotal}`,
       `当前文件行：${r.line}${r.dryRun ? '（仅解析，不保存检查点）' : '（检查点已保存）'}`,
+      ...(r.direction === 'reverse'
+        ? [
+            `倒序扫描 ${r.processedLines}/${r.totalLines} 行 · ${
+              r.nextLine > 0
+                ? r.dryRun
+                  ? `未扫描部分从第 ${r.nextLine} 行开始`
+                  : `下次从第 ${r.nextLine} 行继续`
+                : '已到文件开头'
+            }`,
+          ]
+        : []),
       ...(r.errorLog ? [`错误记录：${r.errorLog}`] : []),
     ];
   if (command === 'resolve-alias-misses')
@@ -221,7 +234,7 @@ export function createPresentation(options: { human: boolean; output?: Writable 
         );
       } else if (entry.event === 'archive_resumed') {
         note(
-          `文件：${entry.file}\n检查点：第 ${entry.checkpointLine} 行\n从第 ${entry.checkpointLine + 1} 行继续`,
+          `文件：${entry.file}\n顺序：从末行倒序\n检查点：${entry.checkpointLine ? `第 ${entry.checkpointLine} 行` : '尚无进度'}\n${entry.nextLine > 0 ? `从第 ${entry.nextLine} 行继续` : '已到文件开头'}`,
           '导入进度',
         );
       } else if (entry.event === 'backup_restore_started') {

@@ -160,7 +160,7 @@ export async function fillParameters(
     if (extra && (await prompts.confirm('调整高级选项（否则使用默认值）？'))) {
       if (command === 'sync-archive' && !v.dryRun && v.checkpointInterval === undefined)
         v.checkpointInterval = await prompts.text({
-          message: '检查点保存间隔（文件行数）',
+          message: '检查点保存间隔（从末尾已扫描行数）',
           defaultValue: '20',
           validate: integerInput(1),
         });

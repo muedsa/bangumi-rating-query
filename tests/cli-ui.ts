@@ -254,7 +254,11 @@ test('Clack 下一批复用参数和检查点，JSON 重定向始终为独立结
     [2, 1],
   );
   assert.equal(batches[1].complete, true);
-  assert(result.stderr.includes('从第 3 行继续'));
+  assert(result.stderr.includes('从第 1 行继续'));
+  assert.deepEqual(
+    batches.map((b) => b.line),
+    [2, 1],
+  );
 });
 
 test('进度动画中 SIGINT 等待当前写入并保存检查点，保存失败仍以错误退出', async () => {
@@ -299,7 +303,7 @@ test('进度动画中 SIGINT 等待当前写入并保存检查点，保存失败
       requests.map((r) => r.event),
       ['import_started', 'import_completed', 'checkpoint'],
     );
-    assert.equal(requests[2].state.line, 1);
+    assert.equal(requests[2].state.line, 2);
     assert.equal(requests[2].state.complete, false);
     assert.equal(result.code, failCheckpoint ? 1 : 130, result.stderr);
     if (failCheckpoint) {
@@ -312,7 +316,11 @@ test('进度动画中 SIGINT 等待当前写入并保存检查点，保存失败
           imported: 1,
           skipped: 0,
           skippedTotal: 0,
-          line: 1,
+          line: 2,
+          direction: 'reverse',
+          totalLines: 2,
+          processedLines: 1,
+          nextLine: 1,
           complete: false,
           status: 'stopped',
           errorLog: null,

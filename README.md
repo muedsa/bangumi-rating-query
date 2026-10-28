@@ -366,15 +366,19 @@ bun run cli sync-archive --file data/subject.jsonlines --skip-invalid --limit 10
 
 结果中 `skipped` 是本次跳过数量，`skippedTotal` 是该检查点累计跳过数量。`complete=true` 仅表示已遍历文件；有跳过记录时 `status=partial`，触及批次上限时为 `in_progress`，全部遍历且无跳过时才为 `complete`。允许跳过的运行正常退出，自动化应检查 `status`，不能只凭退出码认定全部数据已入库。
 
-每次默认最多处理 1000 个有效动画条目，跳过的无效条目不占此额度。再次执行相同命令会从检查点继续，追加 `--skip-invalid` 也会复用已有检查点。检查点以文件 SHA-256 和快照时间标识，默认间隔为 20 行，连续非动画行会合并保存，正常结束时也保存；可通过 `--checkpoint-interval` 设置保存间隔，必须为正整数，直接连接 SQLite/PostgreSQL 和远程 API 均支持：
+`sync-archive` 从**文件最后一行向第一行倒序导入**，优先处理位于文件尾部的较新条目；实际优先级取决于源文件的排列。启动时流式统计总行数并计算文件 SHA-256，然后按块倒序读取，不把整个 Archive 加载到内存。错误日志和进度中的行号仍是原始文件的行号，处理时逐渐减小。
+
+每次默认最多处理 1000 个有效动画条目，跳过的无效条目不占此额度。再次执行相同命令会从倒序检查点继续，追加 `--skip-invalid` 也会复用已有检查点。检查点以读取方向、文件 SHA-256 和快照时间标识，记录原始行号、字节位置和从末尾累计已扫描行数；续跑直接定位尚未处理的文件部分。默认间隔为 20 行，连续非动画行会合并保存，正常结束时也保存；可通过 `--checkpoint-interval` 设置保存间隔，必须为正整数，直接连接 SQLite/PostgreSQL 和远程 API 均支持：
 
 ```sh
 bun run cli sync-archive --file data/subject.jsonlines --limit 1000 --checkpoint-interval 50
 ```
 
-间隔按原始文件行号计算：默认第 20、40、60……行为周期保存点。连续非动画行（`type !== 2`）经过多个保存点时，合并为一次，处理下一条动画或坏项前保存到忽略段末尾；如果忽略段持续到文件结束或取消，则只做结束保存。例如前 200 行都是非动画，第 201 行是动画时，会在处理第 201 行前保存第 200 行，无需发送 10 次检查点请求。坏项仍按 `--skip-invalid` 的原规则处理，不参与这项合并；空行直接略过，不触发周期保存。
+间隔按**从文件末尾累计已扫描行数**计算：默认扫描到第 20、40、60……行时为周期保存点。例如总计 1000 行时，对应原始文件第 981、961、941……行。连续非动画行（`type !== 2`）经过多个保存点时，合并为一次，处理下一条动画或坏项前保存到忽略段最后已处理的位置；如果忽略段持续到文件开头或取消，则只做结束保存。例如第 2～201 行都是非动画，第 1 行是动画时，会在导入第 1 行前保存第 2 行，无需发送 10 次检查点请求。坏项仍按 `--skip-invalid` 的原规则处理，不参与这项合并；空行计入已扫描行数，但自身不触发周期保存。
 
-达到 `--limit` 时保存一次并标记 `complete=false`，正常扫描到文件末尾时保存并标记 `complete=true`。启动和进度日志包含实际使用的 `checkpointInterval`。修改间隔不会改变检查点标识，续跑时仍按文件绝对行号触发保存；`--dry-run` 始终不写检查点。`MAX_BATCH_SIZE` 控制评分查询接口的批量大小，与 CLI 检查点间隔无关。
+达到 `--limit` 时保存一次并标记 `complete=false`，正常扫描到文件开头时保存并标记 `complete=true`。启动和进度日志包含实际使用的 `checkpointInterval`。修改间隔不会改变检查点标识，续跑时仍按从末尾累计已扫描行数触发保存；`--dry-run` 始终不写检查点。`MAX_BATCH_SIZE` 控制评分查询接口的批量大小，与 CLI 检查点间隔无关。
+
+旧版本正序检查点仍保留，倒序导入使用独立的 `archive:reverse:<SHA-256>:<快照时间戳>` 键。**升级后同一文件首次倒序导入会从文件末尾开始**，之后重复原命令即可继续下一批；已存在的条目仍按来源时间幂等合并，不会因为重新扫描而覆盖更新的数据。
 
 失败时保留上次成功保存的检查点，续跑可能重放之后已导入的条目，导入按来源时间保持幂等；错误日志也可能出现重复记录，可按 `archiveKey` 和 `line` 去重。已完成的文件再次执行不会重新导入。新快照会得到新的检查点。
 
@@ -388,15 +392,15 @@ bun run cli sync-archive --file data/subject.jsonlines --limit 1000 --checkpoint
 
 ```sh
 bun run cli sync-archive --file data/subject.jsonlines --dry-run --skip-invalid
-# 只解析前 1000 个有效动画条目，并显示逐条解析日志
+# 从末尾开始，只解析 1000 个有效动画条目，并显示逐条解析日志
 bun run cli sync-archive --file data/subject.jsonlines --dry-run --skip-invalid --limit 1000 --log-level debug
 ```
 
-该模式从文件首行开始，默认扫描整个文件；显式指定 `--limit` 时，以成功解析的动画条数为上限，无效项和非动画不占额度。无需管理 Token，也可省略 `--as-of`；如果传入快照时间或文件旁存在 `.meta.json`，仍会校验其中的时间格式。
+该模式同样从文件末行倒序开始，默认扫描整个文件；显式指定 `--limit` 时，以成功解析的动画条数为上限，无效项和非动画不占额度。开始前仅统计总行数，不计算 SHA-256。无需管理 Token，也可省略 `--as-of`；如果传入快照时间或文件旁存在 `.meta.json`，仍会校验其中的时间格式。
 
 `--dry-run` 不连接本地数据库或远程 API，不读取或更新同步检查点，也不创建或追加 `.errors.jsonl`；即使带有 `--api-url`、`--request-delay-ms` 和 `--request-retries`，也不会发送请求或等待。因此不会推进下一批实际导入的位置。无效项默认终止解析，添加 `--skip-invalid` 后跳过并记录到 stderr 日志。
 
-终端显示统计摘要；使用 `--json` 或重定向 stdout 可获得 JSON 汇总：`dryRun=true`、`parsed`（成功解析的动画条数）、`ignored`（非动画）、`skipped`（无效项）、`emptyLines`（空行）、`line`（当前文件行号）、`complete` 和 `status`。`imported` 始终为 `0`，`errorLog` 为 `null`。统计按行计数，相同条目 ID 的重复行会分别计数；只有完整扫描且没有跳过项时，`status` 才为 `complete`。
+终端显示统计摘要；使用 `--json` 或重定向 stdout 可获得 JSON 汇总：`dryRun=true`、`parsed`（成功解析的动画条数）、`ignored`（非动画）、`skipped`（无效项）、`emptyLines`（空行）、`line`（最后已处理的原始行号）、`complete` 和 `status`。实际导入和纯解析都会返回 `direction=reverse`、`totalLines`、`processedLines`（从末尾累计已扫描行数）及 `nextLine`（下次应处理的原始行号，`0` 表示已到文件开头）；尚未处理任何行时 `line=0`。纯解析的 `imported` 始终为 `0`，`errorLog` 为 `null`。统计按行计数，相同条目 ID 的重复行会分别计数；只有完整扫描且没有跳过项时，`status` 才为 `complete`。
 
 ### 同步到远程 Worker 或 Node 服务
 
@@ -439,7 +443,7 @@ Archive 和单条目更新可用系统定时任务、CI 等周期执行以上 CL
 默认以 `info` 级别展示日志：交互终端在 **stderr** 显示阶段、计数、速度、检查点和关键提示；非终端 / CI 在 stderr 输出 JSONL，包含时间、命令、事件、中文说明和累计耗时。`--json` 或 stdout 重定向时，stdout 仅输出命令结果，不混入界面。
 
 - 启动、存储目标就绪、完成及失败均有日志；长任务每 5 秒报告当前阶段。
-- Archive 导入会报告文件校验、检查点恢复和保存、当前文件行号、条目 ID、成功数、无效跳过数、非动画忽略数、累计跳过数及导入速度。计数和速度针对本次执行，`checkpointLine` 是最近一次成功保存的检查点行号。
+- Archive 导入会报告文件校验、倒序检查点恢复和保存、当前原始行号、条目 ID、成功数、无效跳过数、非动画忽略数、累计跳过数及导入速度。导入/跳过计数和速度针对本次执行，`processedLines` 是从文件末尾累计已扫描行数，`checkpointLine` 是最近一次成功保存的原始行号，`nextLine` 标明下一行。
 - 备份报告校验、分页导出及恢复进度；下载报告已接收字节数、解压和文件校验阶段；calendar 每轮报告导入和 platform 补全结果。
 - 失败会记录当前阶段、进度与错误原因链；远程请求失败还记录 HTTP 状态码（如已收到响应）、耗时、Cloudflare Ray ID 和服务端 `X-Request-ID`（如有）。Archive 远程请求重试另有 `api_request_retry` 日志，调整日志级别不影响重试和续跑规则。
 

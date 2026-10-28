@@ -213,7 +213,7 @@ test('Clack 别名界面支持有候选时换词，原名称用于绑定，取�
   ).toBe('quit');
 });
 
-test('Archive 取消在当前成功写入之后保存检查点，续跑不漏数据，回放历史行时不倒退', async () => {
+test('Archive 倒序取消在当前成功写入之后保存检查点，续跑及再次取消不漏数据', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'bangumi-cancel-'));
   const file = join(dir, 'subject.jsonlines');
   await writeFile(
@@ -242,20 +242,20 @@ test('Archive 取消在当前成功写入之后保存检查点，续跑不漏数
   };
   expect(await syncArchive({ ...options, signal: controller.signal })).toMatchObject({
     status: 'stopped',
-    line: 1,
+    line: 3,
     imported: 1,
     complete: false,
   });
-  expect(JSON.parse(state!)).toMatchObject({ line: 1, complete: false });
+  expect(JSON.parse(state!)).toMatchObject({ line: 3, processedLines: 1, complete: false });
   await syncArchive(options);
-  expect(imported).toEqual([1, 2, 3]);
+  expect(imported).toEqual([3, 2, 1]);
   const replay = new AbortController();
   target.getState = async () => {
     replay.abort();
     return state;
   };
-  expect((await syncArchive({ ...options, signal: replay.signal })).line).toBe(3);
-  expect(JSON.parse(state!).line).toBe(3);
+  expect((await syncArchive({ ...options, signal: replay.signal })).line).toBe(1);
+  expect(JSON.parse(state!).line).toBe(1);
 });
 
 test('未知总量的进度只显示计数，错误摘要和别名统计可读', () => {
@@ -290,6 +290,18 @@ test('未知总量的进度只显示计数，错误摘要和别名统计可读',
     })[0],
   ).toBe('本次解析达到处理上限');
   expect(resultLines('sync-archive', { dryRun: true, status: 'stopped' })[0]).toBe('已停止解析');
+  const reverseProgress = {
+    direction: 'reverse',
+    totalLines: 100,
+    processedLines: 20,
+    nextLine: 80,
+  };
+  expect(resultLines('sync-archive', { ...reverseProgress, dryRun: true })).toContain(
+    '倒序扫描 20/100 行 · 未扫描部分从第 80 行开始',
+  );
+  expect(resultLines('sync-archive', reverseProgress)).toContain(
+    '倒序扫描 20/100 行 · 下次从第 80 行继续',
+  );
   expect(
     resultLines('alias-misses', [{ name: '作品', missCount: 3, planned: false }])[0],
   ).toContain('无计划');

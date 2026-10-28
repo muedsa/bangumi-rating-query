@@ -107,7 +107,11 @@ test('Archive dry-run 默认全量统计，不请求 API、不创建数据库或
       imported: 0,
       skipped: 2,
       skippedTotal: 2,
-      line: 1205,
+      line: 1,
+      direction: 'reverse',
+      totalLines: 1205,
+      processedLines: 1205,
+      nextLine: 0,
       complete: true,
       status: 'partial',
       errorLog: null,
@@ -128,10 +132,10 @@ test('Archive dry-run 默认全量统计，不请求 API、不创建数据库或
     const limited = await run(['--limit', '1', '--log-level', 'debug']);
     const result = JSON.parse(limited.stdout);
     assert.equal(result.parsed, 1);
-    assert.equal(result.line, 5);
+    assert.equal(result.line, 1205);
     assert.equal(result.complete, false);
     assert.equal(result.status, 'in_progress');
-    assert.equal(JSON.parse((await run(['--limit', '1'])).stdout).line, 5);
+    assert.equal(JSON.parse((await run(['--limit', '1'])).stdout).line, 1205);
     assert(limited.stderr.includes('archive_record_parsed'));
     assert.equal(requests, 0);
     assert.equal(existsSync(join(dir, 'untouched')), false);
@@ -142,7 +146,7 @@ test('Archive dry-run 默认全量统计，不请求 API、不创建数据库或
   }
 });
 
-test('Archive dry-run 从首行统计，保留已有数据、错误文件与检查点，真实导入仍正常续跑', async () => {
+test('Archive dry-run 从末行统计，保留已有数据、错误文件与检查点，真实导入仍正常续跑', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'bangumi-dry-run-state-'));
   const file = join(dir, 'subject.jsonlines');
   const database = join(dir, 'app.sqlite');
@@ -195,11 +199,11 @@ test('Archive dry-run 从首行统计，保留已有数据、错误文件与检�
       .split('\n')
       .filter((line) => line.startsWith('{'))
       .map((line) => JSON.parse(line))
-      .some((log) => log.event === 'archive_record_parsed' && log.subjectId === 1),
+      .some((log) => log.event === 'archive_record_parsed' && log.subjectId === 2),
   );
   assert.deepEqual(snapshot(), before);
   assert.equal(await readFile(`${file}.errors.jsonl`, 'utf8'), 'existing error log\n');
-  assert.equal(JSON.parse((await run([])).stdout).line, 2);
+  assert.equal(JSON.parse((await run([])).stdout).line, 1);
   assert.equal(snapshot().subjects.length, 2);
 });
 
@@ -222,7 +226,7 @@ test('Archive dry-run 遇到无效项默认失败，其他命令拒绝 dry-run �
       .at(-1);
     assert.equal(failure.event, 'cli_failed');
     assert.equal(failure.line, 2);
-    assert.equal(failure.parsed, 1);
+    assert.equal(failure.parsed, 0);
     assert.equal(failure.checkpointLine, null);
     assert(failure.causes[0].message.includes('第 2 行解析失败'));
     return true;
@@ -532,7 +536,7 @@ test('CLI Archive 检查点默认间隔 20，可配置并沿用原检查点，�
     assert.equal(JSON.parse(defaults.stdout).imported, 22);
     assert.deepEqual(
       saved.map((entry) => entry.line),
-      [20, 40, 45],
+      [26, 6, 1],
     );
     assert.equal(saved.at(-1)!.complete, true);
     const logs = defaults.stderr
@@ -548,19 +552,21 @@ test('CLI Archive 检查点默认间隔 20，可配置并沿用原检查点，�
 
     reset();
     const limited = await run(['--checkpoint-interval', '4', '--limit', '2']);
-    assert.deepEqual(saved, [{ line: 4, skippedTotal: 0, complete: false }]);
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0]!.line, 42);
+    assert.equal(saved[0]!.complete, false);
     assert.equal(JSON.parse(limited.stdout).complete, false);
 
     reset();
-    failId = 22;
+    failId = 24;
     await assert.rejects(run(), (error: unknown) => {
       const failure = error as { stderr: string };
-      assert(failure.stderr.includes('第 22 行导入失败'));
+      assert(failure.stderr.includes('第 24 行导入失败'));
       return true;
     });
     assert.deepEqual(
       saved.map((entry) => entry.line),
-      [20],
+      [26],
     );
     assert.equal(imported.length, 10);
     failId = undefined;
@@ -568,11 +574,11 @@ test('CLI Archive 检查点默认间隔 20，可配置并沿用原检查点，�
     assert.equal(JSON.parse(resumed.stdout).imported, 12);
     assert.deepEqual(
       saved.map((entry) => entry.line),
-      [20, 21, 28, 35, 42, 45],
+      [26, 25, 18, 11, 4, 1],
     );
     assert.deepEqual(
       imported,
-      Array.from({ length: 22 }, (_, i) => (i + 1) * 2),
+      Array.from({ length: 22 }, (_, i) => (22 - i) * 2),
     );
     assert.equal(saved.at(-1)!.complete, true);
     assert.equal(keys.size, 1, '修改检查点间隔不会改变文件版本的检查点键');
@@ -583,7 +589,7 @@ test('CLI Archive 检查点默认间隔 20，可配置并沿用原检查点，�
       assert.equal(requests, before, '无效间隔必须在读写检查点或导入前拒绝');
     }
 
-    // 用真实 CLI 和 HTTP 计数：200 行非动画仅合并保存一次，尾部 200 行只最终保存。
+    // 用真实 CLI 和 HTTP 计数：尾部 200 行非动画合并保存一次，头部 200 行只最终保存。
     await writeFile(
       file,
       Array.from({ length: 401 }, (_, i) =>
@@ -594,10 +600,11 @@ test('CLI Archive 检查点默认间隔 20，可配置并沿用原检查点，�
     const before = requests;
     const merged = await run();
     assert.equal(JSON.parse(merged.stdout).imported, 1);
-    assert.deepEqual(saved, [
-      { line: 200, skippedTotal: 0 },
-      { line: 401, skippedTotal: 0, complete: true },
-    ]);
+    assert.deepEqual(
+      saved.map((entry) => entry.line),
+      [202, 1],
+    );
+    assert.equal(saved.at(-1)!.complete, true);
     assert.deepEqual(imported, [201]);
     assert.equal(requests - before, 4, '只读一次检查点、导入一条动画、保存两次检查点');
   } finally {
@@ -2234,7 +2241,10 @@ test('Archive 可跳过损坏行，记录错误并在断点续跑后保留 parti
     name: '损坏条目',
     infobox: '{{Infobox animanga\n|别名=测试\n\\\n}}',
   });
-  await writeFile(file, [valid(1), broken, '{invalid json', valid(2), valid(3)].join('\n') + '\n');
+  await writeFile(
+    file,
+    [valid(1), broken, '{invalid json', valid(2), valid(3)].reverse().join('\n') + '\n',
+  );
   const run = (extra: string[]) =>
     promisify(execFile)(
       process.execPath,
@@ -2258,13 +2268,13 @@ test('Archive 可跳过损坏行，记录错误并在断点续跑后保留 parti
       },
     );
   await assert.rejects(run([]), (error: unknown) =>
-    String((error as { stderr: string }).stderr).includes('第 2 行导入失败'),
+    String((error as { stderr: string }).stderr).includes('第 4 行导入失败'),
   );
   const first = JSON.parse((await run(['--skip-invalid', '--limit', '2'])).stdout);
   assert.equal(first.imported, 2);
   assert.equal(first.skipped, 2);
   assert.equal(first.skippedTotal, 2);
-  assert.equal(first.line, 4);
+  assert.equal(first.line, 2);
   assert.equal(first.complete, false);
   const errors = (await readFile(`${file}.errors.jsonl`, 'utf8'))
     .trim()
@@ -2272,7 +2282,7 @@ test('Archive 可跳过损坏行，记录错误并在断点续跑后保留 parti
     .map((line) => JSON.parse(line));
   assert.deepEqual(
     errors.map((e) => e.line),
-    [2, 3],
+    [4, 3],
   );
   assert.equal(errors[0].subjectId, 2174);
   assert.equal(errors[1].subjectId, null);

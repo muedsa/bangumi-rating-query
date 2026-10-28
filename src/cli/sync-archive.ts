@@ -3,7 +3,7 @@ import { appendFile, readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { fromArchive } from '../adapters/bangumi/parse.ts';
 import type { ImportRecord } from '../core/models.ts';
-import { archiveLines, sha256File } from './archive.ts';
+import { inspectArchiveFile, reverseArchiveLines } from './archive.ts';
 import type { createCliLogger } from './logger.ts';
 import { checkCancelled } from './cancellation.ts';
 
@@ -23,6 +23,16 @@ type Options = {
   logger: ReturnType<typeof createCliLogger>;
   signal?: AbortSignal;
 } & ({ dryRun: true; target?: never } | { dryRun?: false; target: ArchiveTarget });
+
+const checkpointSchema = z.object({
+  version: z.literal(1),
+  direction: z.literal('reverse'),
+  line: z.number().int().nonnegative().safe(),
+  offset: z.number().int().nonnegative().safe(),
+  processedLines: z.number().int().nonnegative().safe(),
+  skippedTotal: z.number().int().nonnegative().safe(),
+  complete: z.boolean().optional(),
+});
 
 export async function syncArchive(options: Options) {
   checkCancelled(options.signal);
@@ -50,20 +60,44 @@ export async function syncArchive(options: Options) {
     .int()
     .min(1)
     .parse(options.checkpointInterval ?? '20');
-  let key: string | null = null;
-  let state: { line: number; skippedTotal?: number } = { line: 0 };
-  if (target) {
-    logger.update({ phase: 'archive_hash', file });
-    logger.log('info', 'archive_hash_started', '计算文件 SHA-256，准备读取检查点', {
-      file,
-      asOf: new Date(asOf).toISOString(),
-    });
-    key = `archive:${await sha256File(file, options.signal)}:${asOf}`;
+  logger.update({ phase: target ? 'archive_hash' : 'archive_index', file });
+  logger.log(
+    'info',
+    target ? 'archive_hash_started' : 'archive_index_started',
+    target ? '计算文件 SHA-256 和总行数，准备倒序导入' : '统计文件总行数，准备倒序解析',
+    { file, asOf: new Date(asOf).toISOString(), direction: 'reverse' },
+  );
+  const { size, totalLines, sha256 } = await inspectArchiveFile(file, {
+    hash: Boolean(target),
+    signal: options.signal,
+  });
+  // 与旧正序检查点隔离，不能将已处理的文件头误当成已处理的文件尾。
+  const key = target ? `archive:reverse:${sha256}:${asOf}` : null;
+  let state: z.infer<typeof checkpointSchema> = {
+    version: 1,
+    direction: 'reverse',
+    line: 0,
+    offset: size,
+    processedLines: 0,
+    skippedTotal: 0,
+  };
+  if (target && key) {
     logger.update({ phase: 'checkpoint_read', file });
-    state = JSON.parse((await target.getState(key)) ?? '{"line":0}') as typeof state;
+    const saved = await target.getState(key);
+    if (saved !== null) state = checkpointSchema.parse(JSON.parse(saved));
+    if (
+      state.processedLines > totalLines ||
+      state.line !== (state.processedLines ? totalLines - state.processedLines + 1 : 0) ||
+      state.offset > size ||
+      (state.offset === 0) !== (state.processedLines === totalLines) ||
+      (state.processedLines === 0 && state.offset !== size) ||
+      (state.complete && state.processedLines !== totalLines)
+    )
+      throw new Error('Archive 倒序检查点与文件不一致，无法安全续跑');
   }
   const errorLog = `${file}.errors.jsonl`;
-  let lineNumber = 0;
+  let cursor = { line: state.line, offset: state.offset, processedLines: state.processedLines };
+  let lineNumber = state.line;
   let parsed = 0;
   let imported = 0;
   let skipped = 0;
@@ -79,6 +113,10 @@ export async function syncArchive(options: Options) {
     phase,
     file,
     dryRun,
+    direction: 'reverse',
+    totalLines,
+    processedLines: cursor.processedLines,
+    nextLine: totalLines - cursor.processedLines,
     line: lineNumber,
     subjectId,
     parsed,
@@ -98,7 +136,7 @@ export async function syncArchive(options: Options) {
   logger.log(
     'info',
     dryRun ? 'archive_dry_run_started' : 'archive_resumed',
-    dryRun ? '开始纯解析统计，从文件首行扫描' : '已读取检查点，开始扫描文件',
+    dryRun ? '开始纯解析统计，从文件末行倒序扫描' : '已读取倒序检查点，从未处理的末行继续',
     {
       file,
       archiveKey: key,
@@ -108,35 +146,49 @@ export async function syncArchive(options: Options) {
       checkpointInterval,
       requestDelayMs: options.requestDelayMs ?? 0,
       dryRun,
+      direction: 'reverse',
+      totalLines,
+      processedLines: cursor.processedLines,
+      nextLine: totalLines - cursor.processedLines,
     },
   );
   logger.update(progress('archive_scan'));
-  async function saveCheckpoint(complete?: boolean, throughLine = lineNumber) {
+  async function saveCheckpoint(complete?: boolean) {
     if (!target || !key) return;
     logger.update(progress('checkpoint_write'));
     await target.setState(
       key,
       JSON.stringify({
-        line: throughLine,
+        version: 1,
+        direction: 'reverse',
+        ...cursor,
         skippedTotal,
         ...(complete === undefined ? {} : { complete }),
       }),
     );
-    checkpointLine = throughLine;
+    checkpointLine = cursor.line;
     logger.log('info', 'archive_checkpoint_saved', '已保存导入检查点', progress('archive_scan'));
     logger.update(progress('archive_scan'));
   }
-  for await (const line of archiveLines(file)) {
+  for await (const entry of reverseArchiveLines(file, { endOffset: state.offset })) {
     // 在下一行开始前停止；已完成的当前写入包含在最后保存的检查点中。
     if (options.signal?.aborted) {
       stopped = true;
       break;
     }
-    lineNumber++;
+    const { line } = entry;
+    lineNumber = totalLines - cursor.processedLines;
+    const advance = () => {
+      cursor = {
+        line: lineNumber,
+        offset: entry.offset,
+        processedLines: cursor.processedLines + 1,
+      };
+    };
     logger.update(progress('archive_scan'));
-    if (lineNumber <= state.line) continue;
     if (!line.trim()) {
       emptyLines++;
+      advance();
       continue;
     }
     let raw: unknown;
@@ -152,18 +204,18 @@ export async function syncArchive(options: Options) {
     }
     if (!parseFailure && record === null) {
       ignored++;
+      advance();
       // 连续非动画行只累积进度，不为途经的每个保存点发送请求。
-      if (lineNumber % checkpointInterval === 0) checkpointDeferred = true;
+      if (cursor.processedLines % checkpointInterval === 0) checkpointDeferred = true;
       logger.update(progress('archive_scan'));
       continue;
     }
     if (checkpointDeferred) {
       // 当前行尚未处理；保存到忽略段末尾，不能越过接下来可能失败的动画或坏项。
       // 放在解析 catch 外，避免检查点故障被 skip-invalid 当作坏项跳过。
-      await saveCheckpoint(undefined, lineNumber - 1);
+      await saveCheckpoint();
       checkpointDeferred = false;
       if (options.signal?.aborted) {
-        lineNumber--;
         stopped = true;
         break;
       }
@@ -235,16 +287,17 @@ export async function syncArchive(options: Options) {
         );
       }
     }
+    advance();
     logger.update(progress('archive_scan'));
     if (limit !== null && parsed >= limit) {
       limited = true;
       break;
     }
-    if (lineNumber % checkpointInterval === 0) await saveCheckpoint();
+    if (cursor.processedLines % checkpointInterval === 0) await saveCheckpoint();
   }
   if (options.signal?.aborted) stopped = true;
-  // 取消可能发生在跳过历史行期间，不能把既有检查点倒退。
-  if (stopped) lineNumber = Math.max(lineNumber, state.line);
+  // 只保存已处理的行；尚未导入的当前行以及取消后读出的下一行不能推进游标。
+  lineNumber = cursor.line;
   const complete = !limited && !stopped;
   await saveCheckpoint(complete);
   const status = stopped
@@ -266,6 +319,10 @@ export async function syncArchive(options: Options) {
     skipped,
     skippedTotal,
     line: lineNumber,
+    direction: 'reverse' as const,
+    totalLines,
+    processedLines: cursor.processedLines,
+    nextLine: totalLines - cursor.processedLines,
     complete,
     status,
     errorLog: !dryRun && skippedTotal > 0 ? errorLog : null,
