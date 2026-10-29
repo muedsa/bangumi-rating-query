@@ -1,5 +1,5 @@
 import type { AnimeRepository } from './ports.ts';
-import type { QueryItem, Subject } from './models.ts';
+import type { QueryItem, Rating, Subject } from './models.ts';
 import { extractSubjectId, normalizeName } from './matching.ts';
 
 export class QueryService {
@@ -88,7 +88,10 @@ export class QueryService {
           ...base,
           status: 'ambiguous' as const,
           matchReason: conflict ? 'conflicting_names' : 'shared_alias',
-          candidates: candidates.slice(0, 20).map(publicSubject),
+          candidates: candidates.slice(0, 20).map((subject) => ({
+            ...publicSubject(subject),
+            ...publicRating(ratings.get(subject.id), now, this.options.ratingTtlHours),
+          })),
           candidatesTruncated: candidates.length > 20,
         };
       const subject = candidates[0]!;
@@ -113,12 +116,7 @@ export class QueryService {
               ? 'exact_alias'
               : 'normalized_alias',
         matchedAliases: matchedAliases.map((a) => ({ name: a.name, source: a.source })),
-        rating: rating
-          ? { score: rating.score, votes: rating.votes, rank: rating.rank, source: rating.source }
-          : null,
-        ratingStatus: !rating ? 'unavailable' : rating.score === null ? 'unrated' : 'available',
-        dataAsOf: rating ? new Date(rating.dataAsOf).toISOString() : null,
-        stale: !rating || now - rating.dataAsOf > this.options.ratingTtlHours * 3_600_000,
+        ...publicRating(rating, now, this.options.ratingTtlHours),
       };
     });
     if (this.options.statsEnabled && hits.size) {
@@ -147,5 +145,16 @@ function publicSubject(s: Subject) {
     airDate: s.airDate,
     platform: s.platform,
     url: `https://bgm.tv/subject/${s.id}`,
+  };
+}
+
+function publicRating(rating: Rating | undefined, now: number, ratingTtlHours: number) {
+  return {
+    rating: rating
+      ? { score: rating.score, votes: rating.votes, rank: rating.rank, source: rating.source }
+      : null,
+    ratingStatus: !rating ? 'unavailable' : rating.score === null ? 'unrated' : 'available',
+    dataAsOf: rating ? new Date(rating.dataAsOf).toISOString() : null,
+    stale: !rating || now - rating.dataAsOf > ratingTtlHours * 3_600_000,
   };
 }

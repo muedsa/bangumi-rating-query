@@ -52,8 +52,23 @@ export const ambiguousExample = {
   status: 'ambiguous',
   matchReason: 'shared_alias',
   candidates: [
-    publicSubject,
-    { ...publicSubject, id: 101, name: '另一部示例动画', url: 'https://bgm.tv/subject/101' },
+    {
+      ...publicSubject,
+      rating: matchedExample.rating,
+      ratingStatus: matchedExample.ratingStatus,
+      dataAsOf: matchedExample.dataAsOf,
+      stale: matchedExample.stale,
+    },
+    {
+      ...publicSubject,
+      id: 101,
+      name: '另一部示例动画',
+      url: 'https://bgm.tv/subject/101',
+      rating: null,
+      ratingStatus: 'unavailable',
+      dataAsOf: null,
+      stale: true,
+    },
   ],
   candidatesTruncated: false,
 };

@@ -51,16 +51,7 @@ export const publicSubjectSchema = z.object({
   platform: z.string().max(100).describe('作品形式，如 TV、OVA；未知为空字符串。'),
   url: z.url().describe('Bangumi 条目链接。'),
 });
-export const matchedSchema = z.object({
-  inputId: z.string().describe('请求关联 ID；按 ID 查询接口使用条目 ID 的十进制字符串。'),
-  status: z.literal('matched').describe('唯一匹配到已收录条目。'),
-  subject: publicSubjectSchema.describe('匹配条目。'),
-  matchReason: z
-    .enum(['subject_id', 'exact_alias', 'normalized_alias'])
-    .describe('按显式 ID/官方链接、精确别名或归一化别名匹配。'),
-  matchedAliases: z
-    .array(z.object({ name: nameSchema, source: aliasSchema.shape.source }))
-    .describe('参与匹配的别名；显式 subjectId 查询时为空数组。'),
+const publicRatingFields = {
   rating: ratingSchema
     .pick({ score: true, votes: true, rank: true, source: true })
     .nullable()
@@ -75,6 +66,18 @@ export const matchedSchema = z.object({
   stale: z
     .boolean()
     .describe('无评分记录或评分版本距当前时间超过 RATING_TTL_HOURS 时为 true；不会自动回源刷新。'),
+};
+export const matchedSchema = z.object({
+  inputId: z.string().describe('请求关联 ID；按 ID 查询接口使用条目 ID 的十进制字符串。'),
+  status: z.literal('matched').describe('唯一匹配到已收录条目。'),
+  subject: publicSubjectSchema.describe('匹配条目。'),
+  matchReason: z
+    .enum(['subject_id', 'exact_alias', 'normalized_alias'])
+    .describe('按显式 ID/官方链接、精确别名或归一化别名匹配。'),
+  matchedAliases: z
+    .array(z.object({ name: nameSchema, source: aliasSchema.shape.source }))
+    .describe('参与匹配的别名；显式 subjectId 查询时为空数组。'),
+  ...publicRatingFields,
 });
 export const notFoundSchema = z.object({
   inputId: z.string().describe('请求关联 ID。'),
@@ -89,10 +92,12 @@ export const ambiguousSchema = z.object({
     .enum(['conflicting_names', 'shared_alias'])
     .describe('conflicting_names：不同名称指向不相交条目；shared_alias：别名被多个条目共享。'),
   candidates: z
-    .array(publicSubjectSchema)
+    .array(publicSubjectSchema.extend(publicRatingFields))
     .min(1)
     .max(20)
-    .describe('候选按 ID 升序排列，最多 20 条；冲突筛选后也可能仅余一条但仍不自动确认。'),
+    .describe(
+      '候选包含公开条目信息、缓存评分及评分状态，按 ID 升序排列，最多 20 条；冲突筛选后也可能仅余一条但仍不自动确认。',
+    ),
   candidatesTruncated: z.boolean().describe('候选超过 20 条时为 true。'),
 });
 export const batchResponseSchema = z.object({

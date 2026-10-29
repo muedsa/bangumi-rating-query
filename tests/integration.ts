@@ -2000,14 +2000,42 @@ for (const kind of ['node', 'worker', 'postgres'] as const) {
         assert.equal(unavailableSync.status, 503);
         assert.equal(((await unavailableSync.json()) as any).error.code, 'BANGUMI_SYNC_DISABLED');
         assert.equal((await request('/api/v1/ratings/batch', 'POST', { items: [] })).status, 400);
-        for (const record of [
-          fixture(100, 'Test', ['共同别名', '独有别名']),
-          fixture(101, 'Movie', ['共同别名'], 2024),
-          fixture(102, '86', ['数字作品']),
-        ])
+        const unrated = fixture(101, 'Movie', ['共同别名'], 2024);
+        unrated.rating!.score = null;
+        unrated.rating!.votes = 0;
+        unrated.rating!.rank = null;
+        const unavailable = fixture(102, '86', ['数字作品', '共同别名']);
+        unavailable.rating = null;
+        for (const record of [fixture(100, 'Test', ['共同别名', '独有别名']), unrated, unavailable])
           await json('/api/v1/admin/import', 'POST', record);
         const ambiguous = (await batch([{ inputId: 'a', names: ['共同别名'] }])).results[0];
         assert.equal(ambiguous.status, 'ambiguous');
+        assert.deepEqual(
+          ambiguous.candidates.map((candidate: any) => ({
+            id: candidate.id,
+            rating: candidate.rating,
+            ratingStatus: candidate.ratingStatus,
+            dataAsOf: candidate.dataAsOf,
+            stale: candidate.stale,
+          })),
+          [
+            {
+              id: 100,
+              rating: { score: 8.1, votes: 10, rank: 20, source: 'archive' },
+              ratingStatus: 'available',
+              dataAsOf: new Date(asOf).toISOString(),
+              stale: true,
+            },
+            {
+              id: 101,
+              rating: { score: null, votes: 0, rank: null, source: 'archive' },
+              ratingStatus: 'unrated',
+              dataAsOf: new Date(asOf).toISOString(),
+              stale: true,
+            },
+            { id: 102, rating: null, ratingStatus: 'unavailable', dataAsOf: null, stale: true },
+          ],
+        );
         assert.equal((await target.sql('SELECT * FROM subject_usage')).length, 0);
         assert.equal(
           (await batch([{ inputId: 'a', names: ['共同别名'], year: 2024 }])).results[0].subject.id,
@@ -2018,10 +2046,11 @@ for (const kind of ['node', 'worker', 'postgres'] as const) {
           (await batch([{ inputId: 'a', names: ['共同别名', '独有别名'] }])).results[0].subject.id,
           100,
         );
-        assert.equal(
-          (await batch([{ inputId: 'a', names: ['Test', 'Movie'] }])).results[0].status,
-          'ambiguous',
-        );
+        const conflictingNames = (await batch([{ inputId: 'a', names: ['Test', 'Movie'] }]))
+          .results[0];
+        assert.equal(conflictingNames.status, 'ambiguous');
+        assert.equal(conflictingNames.matchReason, 'conflicting_names');
+        assert.deepEqual(conflictingNames.candidates, ambiguous.candidates.slice(0, 2));
         const alias = (
           await json('/api/v1/admin/subjects/100/aliases', 'POST', { name: '  我的别名  ' })
         ).alias;

@@ -317,7 +317,7 @@ export function getOpenApi(maxBatchSize: number) {
           operationId: 'queryRatingsBatch',
           tag: '评分查询',
           summary: '按 ID 或多个名称批量查询评分',
-          description: `每批 1～${maxBatchSize} 项，inputId 在批内唯一；每项至少提供 subjectId 或 names。显式 ID 优先，但仍应用 year/platform。官方 bgm.tv、bangumi.tv、chii.in 的 /subject/ID 链接可作为 names；纯数字作为名称。多个命中名称取交集，未命中名称不影响其他命中；不相交时返回 conflicting_names。结果与输入同序，歧义候选最多 20 条并按 ID 排序。开启统计时记录唯一命中和未知名称，统计写入失败不改变查询成功结果。`,
+          description: `每批 1～${maxBatchSize} 项，inputId 在批内唯一；每项至少提供 subjectId 或 names。显式 ID 优先，但仍应用 year/platform。官方 bgm.tv、bangumi.tv、chii.in 的 /subject/ID 链接可作为 names；纯数字作为名称。多个命中名称取交集，未命中名称不影响其他命中；不相交时返回 conflicting_names。结果与输入同序，歧义候选最多 20 条并按 ID 排序，每个候选包含缓存评分 rating、ratingStatus、dataAsOf 和 stale，含义与唯一命中一致。开启统计时记录唯一命中和未知名称，统计写入失败不改变查询成功结果。`,
           response: 'BatchResponse',
           success:
             '查询完成；逐项检查 status=matched、not_found 或 ambiguous，后两者不是 HTTP 错误。',

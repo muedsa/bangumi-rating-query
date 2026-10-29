@@ -269,7 +269,11 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
           "nameCn": "",
           "airDate": "2026-01-01",
           "platform": "TV",
-          "url": "https://bgm.tv/subject/100"
+          "url": "https://bgm.tv/subject/100",
+          "rating": { "score": 8.1, "votes": 120, "rank": 50, "source": "archive" },
+          "ratingStatus": "available",
+          "dataAsOf": "2026-01-01T00:00:00.000Z",
+          "stale": true
         },
         {
           "id": 101,
@@ -277,7 +281,11 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
           "nameCn": "",
           "airDate": null,
           "platform": "",
-          "url": "https://bgm.tv/subject/101"
+          "url": "https://bgm.tv/subject/101",
+          "rating": null,
+          "ratingStatus": "unavailable",
+          "dataAsOf": null,
+          "stale": true
         }
       ],
       "candidatesTruncated": false
@@ -286,7 +294,9 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
 }
 ```
 
-`matchReason` 为 `shared_alias` 或 `conflicting_names`，歧义响应不附评分，选定候选后可按 ID 查询。不要把未评分当作 0 分，也不要把 `stale=true` 当作请求失败。
+`matchReason` 为 `shared_alias` 或 `conflicting_names`。`candidates` 中每项保留公开条目字段，并附带 `rating`、`ratingStatus`、`dataAsOf` 和 `stale`，含义与上文唯一命中一致：有评分记录时返回 score、votes、rank、source；有记录但未评分时 `rating.score=null`、`ratingStatus="unrated"`；没有评分记录时 `rating=null`、`ratingStatus="unavailable"`、`dataAsOf=null`、`stale=true`。
+
+候选评分直接取自已缓存数据，不触发 Bangumi API 刷新；候选仍按 ID 排序，不按评分排序或自动选定。选定候选后可按 ID 查询。不要把未评分当作 0 分，也不要把 `stale=true` 当作请求失败。仅展示歧义候选不计入条目访问统计。
 
 访问统计启用时，同一请求中每个唯一命中条目只计一次。未命中统计启用时，每个未知归一化名称只计一次；即使该项通过另一个名称命中，也可能记录未知的辅助名称。显式 ID、官方链接、已知但年份不符的别名、歧义别名不作为未知名称。统计写入失败只记录日志，不把成功查询改为失败。
 

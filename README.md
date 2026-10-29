@@ -205,6 +205,7 @@ docker run -d --name bangumi-rating-query --restart unless-stopped \
 - 支持 `https://bgm.tv/subject/123` 等官方条目链接；纯数字名称（如 `86`）仍按名称匹配。按 ID 查询请显式使用 `subjectId`。
 - 多个命中名称的候选有交集时取交集；互相冲突时返回 `ambiguous`，不会静默选第一项。未收录的辅助名称不阻止其他名称匹配。
 - 同名候选最多返回 20 个，超出时 `candidatesTruncated=true`。检索候选规模过大则拒绝请求，建议使用 ID。
+- 歧义响应的每个 `candidates` 条目也包含 `rating`（score、votes、rank、source）、`ratingStatus`、`dataAsOf` 和 `stale`，含义与唯一命中一致；没有评分记录时 `rating=null`。候选仍按 ID 升序排列，不会根据评分自动确认匹配。
 - 名称归一化不删除季数、标点或“剧场版”等信息。
 
 结果示例：
