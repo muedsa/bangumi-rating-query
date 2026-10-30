@@ -1982,6 +1982,69 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
     }
   });
 
+for (const kind of ['node', 'worker', 'postgres'] as const)
+  test(`${kind}: 候选截断与筛选后统一附评分，同批直接命中截断条目仍有评分且仅统计唯一命中`, async () => {
+    const target = await runtime(kind, true, undefined, true);
+    try {
+      await target.sql(`WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<25)
+        INSERT INTO subjects(id,name,name_cn,air_date,platform,metadata_at,cached_at,pinned)
+        SELECT n,'动画'||n,'','2026-01-01',CASE WHEN n=25 THEN 'OVA' ELSE 'TV' END,1,1,0 FROM nums`);
+      await target.sql(`INSERT INTO subject_aliases(id,subject_id,name,normalized_name,source,created_at,updated_at)
+        SELECT 'shared-'||id,id,'共同名称','共同名称','bangumi',1,1 FROM subjects`);
+      await target.sql(`INSERT INTO ratings_current(subject_id,score,votes,rank,source,data_as_of,fetched_at)
+        SELECT id,8.5,10,NULL,'api',${asOf},${asOf} FROM subjects WHERE id IN (1,21,25)`);
+      const response = await target.fetch('/api/v1/ratings/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: [
+            { inputId: 'shared', names: ['共同名称'] },
+            { inputId: 'direct', subjectId: 21 },
+            { inputId: 'platform', names: ['共同名称'], platform: 'ｏｖａ' },
+            { inputId: 'year', names: ['共同名称'], year: 1900 },
+            { inputId: 'duplicate', names: ['共同名称'], platform: 'OVA' },
+          ],
+        }),
+      });
+      assert.equal(response.status, 200);
+      const { results } = batchResponseSchema.parse(await response.json());
+      assert.deepEqual(
+        results.map((r) => r.status),
+        ['ambiguous', 'matched', 'matched', 'not_found', 'matched'],
+      );
+      const [shared, direct, filtered] = results;
+      if (
+        shared?.status !== 'ambiguous' ||
+        direct?.status !== 'matched' ||
+        filtered?.status !== 'matched'
+      )
+        throw new Error('查询匹配状态不正确');
+      assert.deepEqual(
+        shared.candidates.map((c) => c.id),
+        Array.from({ length: 20 }, (_, i) => i + 1),
+      );
+      assert.equal(shared.candidatesTruncated, true);
+      assert.equal(shared.candidates[0]!.rating?.score, 8.5);
+      assert.equal(shared.candidates[1]!.ratingStatus, 'unavailable');
+      assert.equal(direct.subject.id, 21);
+      assert.equal(direct.rating?.score, 8.5);
+      assert.equal(filtered.subject.id, 25);
+      assert.equal(filtered.rating?.score, 8.5);
+      assert.deepEqual(
+        (
+          await target.sql('SELECT subject_id,total_hits FROM subject_usage ORDER BY subject_id')
+        ).map((row) => [row.subject_id, row.total_hits]),
+        [
+          [21, 1],
+          [25, 1],
+        ],
+      );
+      assert.deepEqual(await target.sql('SELECT * FROM alias_miss_stats'), []);
+    } finally {
+      await target.close();
+    }
+  });
+
 for (const kind of ['node', 'worker', 'postgres'] as const) {
   for (const enabled of [false, true])
     test(`${kind}: 真实 HTTP/存储契约，统计 ${enabled}`, async () => {

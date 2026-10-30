@@ -9,7 +9,7 @@
 
 两种入口共享查询业务、参数校验和 JSON 契约。业务层不依赖 Cloudflare 或 Node.js；数据库差异集中在适配器中。Drizzle 用于构造参数化 SQL，D1 与 SQLite 共用 `migrations/0001_initial.sql`，PostgreSQL 使用 `migrations/postgres/0001_initial.sql`。两份初始迁移直接创建完整结构，保留迁移目录及框架以支持后续升级。Node 的 SQLite 使用内置 `node:sqlite`，PostgreSQL 使用 Postgres.js 连接池，均无需编译原生数据库插件。
 
-完整的请求参数、返回字段、错误码、调用示例与迁移流程见 **[HTTP API 使用与参考](docs/api.md)**。`GET /openapi.json` 返回当前部署的 OpenAPI 3.1 定义，包含全部 22 个操作的模型、示例与鉴权信息，批量查询上限随部署配置变化，可导入支持 OpenAPI 3.1 的接口工具。
+完整的请求参数、返回字段、错误码、调用示例与迁移流程见 **[HTTP API 使用与参考](docs/api.md)**。`GET /openapi.json` 返回当前部署的 OpenAPI 3.1 定义，包含所有操作的模型、示例与鉴权信息，批量查询上限随部署配置变化，可导入支持 OpenAPI 3.1 的接口工具。
 
 ## 首版功能
 
@@ -207,6 +207,8 @@ docker run -d --name bangumi-rating-query --restart unless-stopped \
 - 同名候选最多返回 20 个，超出时 `candidatesTruncated=true`。检索候选规模过大则拒绝请求，建议使用 ID。
 - 歧义响应的每个 `candidates` 条目也包含 `rating`（score、votes、rank、source）、`ratingStatus`、`dataAsOf` 和 `stale`，含义与唯一命中一致；没有评分记录时 `rating=null`。候选仍按 ID 升序排列，不会根据评分自动确认匹配。
 - 名称归一化不删除季数、标点或“剧场版”等信息。
+
+批量查询在单次请求内复用名称解析和归一化结果，通过名称索引定位候选。完成匹配、年份/形式筛选和候选截断后，统一去重读取实际返回条目的评分；无返回条目时不读取评分。共享候选或同一条目重复出现在批内不会重复读取评分。数据库适配器仍按参数数量分块查询，不是逐候选发起请求；这些临时索引不跨请求缓存，不影响后续导入或别名变更生效。
 
 结果示例：
 

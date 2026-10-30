@@ -118,7 +118,7 @@ test('同名候选包含缓存评分和状态，区分无记录、未评分和�
 });
 
 test('冲突筛选后仅剩一个候选仍附评分且保留歧义，与唯一命中的评分保持一致', async () => {
-  const { service, recordHits } = setup();
+  const { service, getRatings, recordHits } = setup();
   const response = await service.batch([
     { inputId: 'conflict', names: ['动画1', '动画2'], year: 2026 },
     { inputId: 'direct', subjectId: 1 },
@@ -138,6 +138,7 @@ test('冲突筛选后仅剩一个候选仍附评分且保留歧义，与唯一�
   ]);
   expect(recordHits).toHaveBeenCalledTimes(1);
   expect(recordHits).toHaveBeenCalledWith([1], now);
+  expect(getRatings).toHaveBeenCalledWith([1]);
 });
 
 test('候选附评分后仍按 ID 升序截断到 20 条，不增加逐条评分查询', async () => {
@@ -149,4 +150,22 @@ test('候选附评分后仍按 ID 升序截断到 20 条，不增加逐条评分
   expect(result.candidates.map((s) => s.id)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
   expect(result.candidates[19]).toMatchObject({ rating: null, ratingStatus: 'unavailable' });
   expect(getRatings).toHaveBeenCalledTimes(1);
+  expect(getRatings).toHaveBeenCalledWith(Array.from({ length: 20 }, (_, i) => i + 1));
+});
+
+test('同批重复候选和唯一命中共用评分读取，另一项按 ID 命中的截断条目仍读取评分', async () => {
+  const { service, getRatings, recordHits } = setup(22);
+  const results = batchResponseSchema.parse(
+    await service.batch([
+      { inputId: 'first', names: ['共同别名'] },
+      { inputId: 'repeat', names: ['共同别名'] },
+      { inputId: 'direct', subjectId: 21 },
+      { inputId: 'filtered', names: ['共同别名'], year: 1900 },
+    ]),
+  ).results;
+  expect(results.map((r) => r.status)).toEqual(['ambiguous', 'ambiguous', 'matched', 'not_found']);
+  expect(results[2]).toMatchObject({ subject: { id: 21 }, ratingStatus: 'unavailable' });
+  expect(getRatings).toHaveBeenCalledTimes(1);
+  expect(getRatings).toHaveBeenCalledWith(Array.from({ length: 21 }, (_, i) => i + 1));
+  expect(recordHits).toHaveBeenCalledWith([21], now);
 });
