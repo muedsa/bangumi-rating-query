@@ -18,10 +18,10 @@
     "build:node": "bun build src/entrypoints/node.ts src/entrypoints/cli.ts --target=node --outdir=dist/node",
     "build:worker": "bun build src/entrypoints/worker.ts --target=browser --outfile=dist/worker.js",
     "start": "node dist/node/node.js",
-    "dev:worker": "wrangler dev",
-    "deploy:worker": "wrangler deploy",
+    "dev:worker": "bunx wrangler dev",
+    "deploy:worker": "bunx wrangler deploy",
     "db:migrate": "node dist/node/cli.js migrate",
-    "db:migrate:worker": "wrangler d1 migrations apply DB --local",
+    "db:migrate:worker": "bunx wrangler d1 migrations apply DB --local",
     "cli": "node dist/node/cli.js",
     "stats:summary": "node dist/node/cli.js stats",
     "retention:preview": "node dist/node/cli.js retention-preview",
@@ -43,14 +43,14 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261019.1",
+    "@cloudflare/workers-types": "^5.20261023.1",
     "@electric-sql/pglite": "^0.5.10",
     "@electric-sql/pglite-socket": "^0.2.13",
     "@types/bun": "^1.4.3",
     "@types/node": "^26.6.5",
-    "miniflare": "^5.20261019.0-beta",
+    "miniflare": "5.20261023.3-beta",
     "prettier": "^3.9.10",
     "typescript": "^7.0.2",
-    "wrangler": "^4.151.2"
+    "wrangler": "^4.156.0"
   }
 }
