@@ -16,7 +16,7 @@ import { SqlRepository } from '../src/adapters/storage/repository.ts';
 import { MIGRATIONS, SCHEMA_VERSION } from '../src/adapters/storage/schema.ts';
 import { createApp } from '../src/http/app.ts';
 import { readConfig } from '../src/config.ts';
-import { extractSubjects } from '../src/cli/archive.ts';
+import { extractSubjects, sha256File } from '../src/cli/archive.ts';
 import type { ImportRecord } from '../src/core/models.ts';
 import { batchResponseSchema } from '../src/http/openapi.ts';
 import { BangumiClient } from '../src/adapters/bangumi/client.ts';
@@ -34,6 +34,7 @@ import './migrations.ts';
 import './cli-ui.ts';
 import './backup-recovery.ts';
 import './openapi.ts';
+import './alias-concurrency.ts';
 
 const token = 'integration-test-token-with-32-characters';
 const migration = MIGRATIONS.map(({ file }) => readFileSync(`migrations/${file}`, 'utf8')).join(
@@ -1140,7 +1141,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const) {
       assert.deepEqual(restoreRequests, [2, 1]);
       assert.deepEqual((await target.exportPage(0)).records, records.reverse());
       assert.equal(
-        JSON.parse(String((await server.sql('SELECT value FROM sync_state'))[0]!.value)).complete,
+        JSON.parse((await target.getState(`backup-restore:${await sha256File(file)}`))!).complete,
         true,
       );
     } finally {

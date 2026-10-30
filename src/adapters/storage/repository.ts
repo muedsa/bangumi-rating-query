@@ -22,6 +22,7 @@ import {
   type SqlDriver,
 } from './sql.ts';
 import { aliasInsertStatements } from './season-aliases.ts';
+import { writeAliases } from './alias-write.ts';
 
 const subjectColumns = sql`id, name, name_cn AS "nameCn", air_date AS "airDate", platform,
   metadata_at AS "metadataAt", cached_at AS "cachedAt", pinned`;
@@ -42,6 +43,9 @@ export class SqlRepository implements ApplicationRepository {
   }
   batch(statements: SQL[]) {
     return this.driver.batch(statements.map((statement) => this.dialect.compile(statement)));
+  }
+  writeAliases(prepare: () => Promise<SQL[]>) {
+    return writeAliases(this, prepare);
   }
   exportPage(after: number) {
     return exportPage(this, after);
@@ -65,6 +69,9 @@ export class SqlRepository implements ApplicationRepository {
     return rows.length;
   }
   async mergeCalendar(input: CalendarSnapshot) {
+    await this.writeAliases(() => this.calendarStatements(input));
+  }
+  private async calendarStatements(input: CalendarSnapshot) {
     const snapshot = calendarSnapshotSchema.parse(input);
     const now = snapshot.fetchedAt;
     const items = [...new Map(snapshot.items.map((item) => [item.id, item])).values()];
@@ -99,7 +106,7 @@ export class SqlRepository implements ApplicationRepository {
       VALUES('calendar:last_sync',${JSON.stringify({ imported: items.length, dataAsOf: new Date(now).toISOString() })},${now})
       ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
       WHERE excluded.updated_at >= sync_state.updated_at`);
-    await this.batch(statements);
+    return statements;
   }
   async ready() {
     const rows = await this.query<{ version: number }>(sql`SELECT version FROM schema_version`);
@@ -146,23 +153,29 @@ export class SqlRepository implements ApplicationRepository {
     return rows;
   }
   async addManualAlias(subjectId: number, name: string, now: number) {
-    const statements = await aliasInsertStatements(
-      this,
-      [{ subjectId, name, source: 'manual' }],
-      now,
+    await this.writeAliases(() =>
+      aliasInsertStatements(this, [{ subjectId, name, source: 'manual' }], now),
     );
-    if (statements.length) await this.batch(statements);
     const rows = await this.query<Alias>(sql`SELECT ${aliasColumns} FROM subject_aliases
       WHERE subject_id=${subjectId} AND name=${name}`);
     return rows[0]!;
   }
   async updateManualAlias(id: string, name: string, now: number) {
+    try {
+      const rows = await this.writeAliases(() => this.manualAliasStatements(id, name, now));
+      return (rows[0]?.[0] as Alias | undefined) ?? null;
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new AppError(409, 'ALIAS_EXISTS', '该条目已有相同别名');
+      throw error;
+    }
+  }
+  private async manualAliasStatements(id: string, name: string, now: number) {
     const original = (
       await this.query<Alias>(
         sql`SELECT ${aliasColumns} FROM subject_aliases WHERE id=${id} AND source='manual'`,
       )
     )[0];
-    if (!original) return null;
+    if (!original) return [];
     const aliasStatements = await aliasInsertStatements(
       this,
       [{ subjectId: original.subjectId, name, source: 'manual' }],
@@ -173,26 +186,22 @@ export class SqlRepository implements ApplicationRepository {
       },
     );
     // 重名更新交给唯一约束处理，避免静默合并不同 aliasId。
-    try {
-      const statements = [
-        sql`UPDATE subject_aliases SET name = ${name}, normalized_name = ${normalizeName(name)},
+    return [
+      sql`UPDATE subject_aliases SET name = ${name}, normalized_name = ${normalizeName(name)},
         updated_at = ${now} WHERE id = ${id} AND source = 'manual' RETURNING ${aliasColumns}`,
-      ];
-      statements.push(...aliasStatements);
-      const rows = await this.batch(statements);
-      return (rows[0]?.[0] as Alias | undefined) ?? null;
-    } catch (error) {
-      if (isUniqueViolation(error)) throw new AppError(409, 'ALIAS_EXISTS', '该条目已有相同别名');
-      throw error;
-    }
+      ...aliasStatements,
+    ];
   }
   async deleteManualAlias(id: string) {
-    const rows = await this.query<Row>(
+    const rows = await this.writeAliases(async () => [
       sql`DELETE FROM subject_aliases WHERE id = ${id} AND source = 'manual' RETURNING id`,
-    );
-    return rows.length > 0;
+    ]);
+    return (rows[0]?.length ?? 0) > 0;
   }
   async importRecord(record: ImportRecord) {
+    await this.writeAliases(() => this.importStatements(record));
+  }
+  private async importStatements(record: ImportRecord) {
     const s = record.subject;
     const names = [...new Set([s.name, s.nameCn, ...record.aliases].filter(Boolean))];
     const existing = (await this.findSubjects([s.id]))[0];
@@ -227,7 +236,7 @@ export class SqlRepository implements ApplicationRepository {
           source=excluded.source, data_as_of=excluded.data_as_of, fetched_at=excluded.fetched_at
         WHERE excluded.data_as_of > ratings_current.data_as_of`);
     }
-    if (statements.length) await this.batch(statements);
+    return statements;
   }
   async recordHits(ids: number[], now: number) {
     const day = new Date(now).toISOString().slice(0, 10);

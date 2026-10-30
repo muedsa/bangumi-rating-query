@@ -361,6 +361,8 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
 
 写入 `第2季` 会补充 `第二季`，反之亦然。对第二季优先查找第一季别名，无匹配时按无季数名称查找；只有唯一匹配其他条目才为其添加 `第一季` 和 `第1季`。该过程只查本地库，并保留名称来源；详细规则见 [README](../README.md#手动别名)。
 
+别名写入在事务内校验关联查询使用的数据库版本，发现并发变更后整批回滚并重新查询，最多尝试 5 次；持续冲突返回 `503 SERVICE_UNAVAILABLE`。导入、日历同步、手动修改/删除和备份恢复同样参与协调。原别名、季数补全和未命中清理保持原子提交；备份恢复仍保持原样，不额外推断别名。
+
 特有错误：`404 SUBJECT_NOT_FOUND`；`400 ALIAS_LIMIT`、`ALIAS_TOO_LONG`、`TOO_MANY_CANDIDATES`。容量或长度校验失败时不提交该次别名写入；但 **冲突查询发生在写入之后**，`TOO_MANY_CANDIDATES` 或内部错误不保证别名未保存，应查询列表核对。
 
 ### PATCH /api/v1/admin/aliases/{aliasId}
@@ -695,6 +697,8 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
 ```
 
 成功返回 `{ "saved": true }`。覆盖同名键，无版本比较或并发合并。此接口不与其他导入请求组成跨请求事务，调用方须在数据确认写入后推进检查点；相同键的多个写入者可能互相覆盖。CLI 的检查点时机、`--checkpoint-interval` 和续跑行为见 [README](../README.md)。非法正文为 `400 INVALID_INPUT`。
+
+`internal:alias-write-revision` 是服务内部的别名并发版本键，调用方不应修改或用作同步检查点；它无需随业务备份迁移。
 
 ## 数据模型
 

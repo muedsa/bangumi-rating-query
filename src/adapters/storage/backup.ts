@@ -28,6 +28,10 @@ export async function exportPage(repo: SqlRepository, after: number, limit = 5) 
 }
 
 export async function restoreRecord(repo: SqlRepository, input: BackupRecord) {
+  await repo.writeAliases(() => restoreStatements(repo, input));
+}
+
+async function restoreStatements(repo: SqlRepository, input: BackupRecord) {
   const record = parseBackupRecord(input);
   const s = record.subject;
   if ((await repo.findSubjects([s.id])).length)
@@ -66,7 +70,7 @@ export async function restoreRecord(repo: SqlRepository, input: BackupRecord) {
   if (record.daily.length)
     statements.push(sql`INSERT INTO subject_usage_daily(subject_id,day,hits)
     SELECT ${s.id}, ${repo.dialect.value('day')}, ${repo.dialect.value('hits', 'integer')} FROM ${repo.dialect.each(record.daily)}`);
-  if (statements.length > 40)
+  if (statements.length + 1 > 40)
     throw new AppError(400, 'BACKUP_TOO_LARGE', '单条备份超出事务预算，请先归档历史统计');
-  await repo.batch(statements);
+  return statements;
 }
