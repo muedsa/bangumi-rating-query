@@ -286,6 +286,11 @@ export class SqlRepository implements ApplicationRepository {
       ORDER BY miss_count DESC, last_missed_at DESC, normalized_name LIMIT ${limit}`);
     return rows.map((row) => ({ ...row, planned: Boolean(row.planned) }));
   }
+  async getAliasMiss(name: string) {
+    const rows = await this.query<AliasMiss>(sql`SELECT ${aliasMissColumns} FROM alias_miss_stats
+      WHERE normalized_name=${normalizeName(name)}`);
+    return rows[0] ? { ...rows[0], planned: Boolean(rows[0].planned) } : null;
+  }
   async setAliasMissPlanned(name: string, planned: boolean) {
     const rows = await this
       .query<AliasMiss>(sql`UPDATE alias_miss_stats SET planned=${Number(planned)}

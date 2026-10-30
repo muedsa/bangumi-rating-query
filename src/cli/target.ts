@@ -1,4 +1,4 @@
-import { AppError, type ImportRecord } from '../core/models.ts';
+import type { ImportRecord } from '../core/models.ts';
 import type { BackupRecord } from '../core/backup.ts';
 import { SqlRepository } from '../adapters/storage/repository.ts';
 import { openStorage } from '../adapters/storage/node.ts';
@@ -27,11 +27,9 @@ export async function localTarget(
     restore: (record: BackupRecord) => repo.restoreRecord(record),
     stats: () => repo.stats(),
     aliasMisses: (planned?: boolean, limit?: number) => repo.aliasMissStats(planned, limit),
-    setAliasMissPlanned: async (name: string, planned: boolean) => {
-      const alias = await repo.setAliasMissPlanned(name, planned);
-      if (!alias) throw new AppError(404, 'ALIAS_MISS_NOT_FOUND', '未命中别名记录不存在');
-      return alias;
-    },
+    getAliasMiss: (name: string) => repo.getAliasMiss(name),
+    setAliasMissPlanned: (name: string, planned: boolean) =>
+      repo.setAliasMissPlanned(name, planned),
     prune: (days: number) => repo.pruneDaily(days),
     retention: (days: number, enabled: boolean) => repo.retentionPreview(days, enabled),
     alias: (id: number, name: string) => repo.addManualAlias(id, name, Date.now()),

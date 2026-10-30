@@ -178,6 +178,7 @@ test('Clack 别名界面支持有候选时换词，原名称用于绑定，取�
   const calls: unknown[] = [];
   const target = {
     aliasMisses: async () => [miss],
+    getAliasMiss: async () => miss,
     setAliasMissPlanned: async () => miss,
     searchSubjects: async (keyword: string) => {
       calls.push(['search', keyword]);

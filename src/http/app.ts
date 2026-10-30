@@ -3,7 +3,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { routePath } from 'hono/route';
 import type { Context } from 'hono';
 import { z, ZodError } from 'zod';
-import { AppError, batchSchema, importSchema, positiveId } from '../core/models.ts';
+import { AppError, batchSchema, importSchema, nameSchema, positiveId } from '../core/models.ts';
 import { QueryService } from '../core/query-service.ts';
 import { normalizeName } from '../core/matching.ts';
 import { seasonAliasNames } from '../core/season-aliases.ts';
@@ -228,6 +228,10 @@ export function createApp(
         limit,
       ),
     });
+  });
+  app.get('/api/v1/admin/stats/alias-misses/lookup', async (c) => {
+    const name = nameSchema.parse(c.req.query('name'));
+    return c.json({ alias: await repo.getAliasMiss(name) });
   });
   app.patch('/api/v1/admin/stats/alias-misses', async (c) => {
     const { name, planned } = aliasMissPlanSchema.parse(await c.req.json());

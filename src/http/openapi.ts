@@ -671,6 +671,33 @@ export function getOpenApi(maxBatchSize: number) {
           errors: ['ALIAS_MISS_NOT_FOUND'],
         }),
       },
+      '/api/v1/admin/stats/alias-misses/lookup': {
+        get: op({
+          operationId: 'getAliasMiss',
+          tag: '统计维护',
+          admin: true,
+          summary: '精确查询单个未命中别名的当前状态',
+          description:
+            '按 name 的归一化键查询，包含无计划记录，不受列表排名或 limit 影响。不存在或已清理时返回 alias=null，不返回 404；此查询不写入访问或未命中统计。统计开关关闭后仍可查询历史记录。',
+          parameters: [
+            {
+              name: 'name',
+              in: 'query',
+              required: true,
+              description: '原未命中名称；去除首尾空白后须为 1～300 字符，按归一化检索键定位。',
+              schema: { type: 'string', minLength: 1, maxLength: 300 },
+              example: '尚未收录的名称',
+            },
+          ],
+          response: 'AliasMissLookupResponse',
+          examples: {
+            planned: example({ alias: aliasMissExample }),
+            unplanned: example({ alias: { ...aliasMissExample, planned: false } }),
+            absent: example({ alias: null }),
+          },
+          errors: ['INVALID_INPUT'],
+        }),
+      },
       '/api/v1/admin/stats/prune': {
         post: op({
           operationId: 'pruneDailyStats',

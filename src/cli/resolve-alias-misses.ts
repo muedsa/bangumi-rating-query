@@ -11,7 +11,8 @@ export const aliasReviewOptionsSchema = z.object({
 });
 export interface AliasReviewTarget {
   aliasMisses(planned?: boolean, limit?: number): Promise<AliasMiss[]>;
-  setAliasMissPlanned(name: string, planned: boolean): Promise<AliasMiss>;
+  getAliasMiss(name: string): Promise<AliasMiss | null>;
+  setAliasMissPlanned(name: string, planned: boolean): Promise<AliasMiss | null>;
   searchSubjects(keyword: string, limit: number): Promise<SubjectSearchResult>;
   syncSubject(id: number): Promise<{ imported: number }>;
   alias(id: number, name: string): Promise<unknown>;
@@ -45,26 +46,43 @@ export async function resolveAliasMisses(options: {
     name: string;
     status: 'resolved' | 'skipped' | 'no_candidates' | 'unplanned';
     subjectId?: number;
-    reason?: 'no_candidates' | 'no_exact_match' | 'ambiguous_exact_match';
+    reason?: 'no_candidates' | 'no_exact_match' | 'ambiguous_exact_match' | 'no_longer_pending';
   }[] = [];
   const synced = new Set<number>();
   let stopped = false;
   ui?.write(
     `本批处理 ${misses.length} 个有计划的未命中别名，每个最多 ${searchLimit} 个候选；选中作品后立即导入。`,
   );
-  for (const [index, miss] of misses.entries()) {
+  review: for (const [index, miss] of misses.entries()) {
     if (options.signal?.aborted) {
       stopped = true;
       break;
     }
     const name = nameSchema.parse(miss.name);
     const context = { index: index + 1, total: misses.length, name, completed: results.length };
+    const skipNoLongerPending = () => {
+      results.push({ name, status: 'skipped', reason: 'no_longer_pending' });
+      logger.log('info', 'alias_auto_skipped', `自动跳过：${name}（已清理或已改为无计划）`, {
+        ...context,
+        reason: 'no_longer_pending',
+      });
+    };
     let selected: AliasReviewChoice | undefined;
     let skipReason: (typeof results)[number]['reason'];
     try {
       let keyword = name;
       let result: SubjectSearchResult;
       while (true) {
+        // 精确查询当前记录，不用前 N 条列表判断，避免排名变化造成误跳过。
+        const current = await target.getAliasMiss(name);
+        if (options.signal?.aborted) {
+          stopped = true;
+          break review;
+        }
+        if (!current?.planned) {
+          skipNoLongerPending();
+          continue review;
+        }
         const searchContext = { ...context, keyword };
         logger.update({ phase: 'alias_search', ...searchContext });
         logger.log('info', 'alias_search_started', '搜索未命中别名的候选条目', searchContext);
@@ -116,6 +134,10 @@ export async function resolveAliasMisses(options: {
         }
         logger.update({ phase: 'alias_selection', ...searchContext });
         selected = await ui!.choose(miss, result, index + 1, misses.length);
+        if (options.signal?.aborted) {
+          selected = 'quit';
+          break;
+        }
         if (typeof selected !== 'object') break;
         keyword = nameSchema.parse(selected.search);
         ui!.write(`重新搜索：${keyword}（待处理别名：${name}）`);
@@ -132,9 +154,23 @@ export async function resolveAliasMisses(options: {
         });
         continue;
       }
+      // 用户选择期间也可能被其他操作清理；写入前再次核对。
+      const current = await target.getAliasMiss(name);
+      if (options.signal?.aborted) {
+        stopped = true;
+        break;
+      }
+      if (!current?.planned) {
+        skipNoLongerPending();
+        continue;
+      }
       if (selected === 'unplanned') {
         logger.update({ phase: 'alias_plan_update', ...context });
-        await target.setAliasMissPlanned(name, false);
+        if (!(await target.setAliasMissPlanned(name, false))) {
+          // 复核与 PATCH 之间记录被清理也是正常竞态，不中断整批。
+          skipNoLongerPending();
+          continue;
+        }
         results.push({ name, status: 'unplanned' });
         ui!.write(`已标为无计划：${name}`);
         logger.log('info', 'alias_unplanned', '未命中别名已标为无计划', context);

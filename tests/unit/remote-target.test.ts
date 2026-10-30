@@ -73,6 +73,74 @@ test('启用延迟时串行完成响应再发送下一请求，失败后仍可�
   expect(events).toEqual(['request:1', 'wait:100', 'request:2']);
 });
 
+test('单条未命中查询编码名称并校验响应，错误响应不能当作记录已清理', async () => {
+  const name = '动画 & +/?#第二季';
+  const alias = {
+    name,
+    normalizedName: name,
+    planned: false,
+    missCount: 2,
+    firstMissedAt: 1,
+    lastMissedAt: 2,
+  };
+  for (const value of [alias, null]) {
+    const target = remoteTarget('https://example.com', 'test-token', {
+      fetcher: (async (input, init) => {
+        const url = new URL(String(input));
+        expect(url.pathname).toBe('/api/v1/admin/stats/alias-misses/lookup');
+        expect([...url.searchParams.entries()]).toEqual([['name', name]]);
+        expect(init?.method).toBe('GET');
+        return Response.json({ alias: value });
+      }) as typeof fetch,
+    });
+    expect(await target.getAliasMiss(name)).toEqual(value);
+  }
+  for (const body of [{}, { alias: {} }, { alias: { ...alias, planned: 'false' } }]) {
+    const target = remoteTarget('https://example.com', 'test-token', {
+      fetcher: (async () => Response.json(body)) as unknown as typeof fetch,
+    });
+    await expect(target.getAliasMiss(name)).rejects.toThrow();
+    await expect(target.setAliasMissPlanned(name, false)).rejects.toThrow();
+  }
+});
+
+test('仅修改计划的 404 ALIAS_MISS_NOT_FOUND 转为缺失，其他响应和网络错误仍抛出', async () => {
+  for (const [status, code] of [
+    [404, 'ALIAS_MISS_NOT_FOUND'],
+    [404, 'NOT_FOUND'],
+    [401, 'UNAUTHORIZED'],
+    [503, 'ALIAS_MISS_NOT_FOUND'],
+  ] as const) {
+    const target = remoteTarget('https://example.com', 'test-token', {
+      fetcher: (async () =>
+        Response.json({ error: { code, message: 'test' } }, { status })) as unknown as typeof fetch,
+    });
+    if (status === 404 && code === 'ALIAS_MISS_NOT_FOUND')
+      expect(await target.setAliasMissPlanned('动画', false)).toBeNull();
+    else
+      await expect(target.setAliasMissPlanned('动画', false)).rejects.toThrow(
+        `管理 API 返回 ${status}`,
+      );
+    await expect(target.getAliasMiss('动画')).rejects.toThrow(`管理 API 返回 ${status}`);
+    await expect(target.alias(1, '动画')).rejects.toThrow(`管理 API 返回 ${status}`);
+  }
+  for (const body of [
+    'Not Found',
+    JSON.stringify({ error: { message: 'ALIAS_MISS_NOT_FOUND' } }),
+  ]) {
+    const target = remoteTarget('https://example.com', 'test-token', {
+      fetcher: (async () => new Response(body, { status: 404 })) as unknown as typeof fetch,
+    });
+    await expect(target.setAliasMissPlanned('动画', false)).rejects.toThrow('管理 API 返回 404');
+  }
+  const target = remoteTarget('https://example.com', 'test-token', {
+    fetcher: (async () => {
+      throw new TypeError('network failure');
+    }) as unknown as typeof fetch,
+  });
+  await expect(target.setAliasMissPlanned('动画', false)).rejects.toThrow('network failure');
+});
+
 test('拒绝负数、小数和会导致定时器溢出的延迟', () => {
   for (const requestDelayMs of [-1, 0.5, Infinity, 2147483648])
     expect(() => remoteTarget('https://example.com', 'test-token', { requestDelayMs })).toThrow();

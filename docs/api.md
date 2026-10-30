@@ -116,30 +116,31 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
 
 共 19 个路径、22 个操作。所有管理接口适用[通用管理错误](#通用错误范围)。
 
-| 方法   | 路径                                  | 用途                   | 管理鉴权 |
-| ------ | ------------------------------------- | ---------------------- | -------- |
-| GET    | `/health/live`                        | 存活检查               | 否       |
-| GET    | `/health/ready`                       | 数据库就绪检查         | 否       |
-| GET    | `/openapi.json`                       | 当前部署的机器可读文档 | 否       |
-| POST   | `/api/v1/ratings/batch`               | 批量评分查询           | 否       |
-| GET    | `/api/v1/subjects/{id}`               | 按 ID 查询评分         | 否       |
-| GET    | `/api/v1/subjects/{id}/aliases`       | 列出别名               | 否       |
-| POST   | `/api/v1/admin/subjects/{id}/aliases` | 添加手动别名           | 是       |
-| PATCH  | `/api/v1/admin/aliases/{aliasId}`     | 修改手动别名           | 是       |
-| DELETE | `/api/v1/admin/aliases/{aliasId}`     | 删除手动别名           | 是       |
-| POST   | `/api/v1/admin/subjects/search`       | 搜索 Bangumi 动画      | 是       |
-| POST   | `/api/v1/admin/subjects/{id}/sync`    | 同步一条动画           | 是       |
-| POST   | `/api/v1/admin/calendar/sync`         | 同步全周放送日历       | 是       |
-| POST   | `/api/v1/admin/import`                | 导入标准化数据         | 是       |
-| GET    | `/api/v1/admin/export`                | 分页导出备份           | 是       |
-| POST   | `/api/v1/admin/restore`               | 恢复单条备份           | 是       |
-| GET    | `/api/v1/admin/stats`                 | 访问热度               | 是       |
-| GET    | `/api/v1/admin/stats/alias-misses`    | 未命中别名统计         | 是       |
-| PATCH  | `/api/v1/admin/stats/alias-misses`    | 修改处理计划           | 是       |
-| POST   | `/api/v1/admin/stats/prune`           | 清理旧每日统计         | 是       |
-| GET    | `/api/v1/admin/retention`             | 冷数据预览             | 是       |
-| GET    | `/api/v1/admin/sync-state/{key}`      | 读取检查点             | 是       |
-| PUT    | `/api/v1/admin/sync-state/{key}`      | 保存检查点             | 是       |
+| 方法   | 路径                                      | 用途                   | 管理鉴权 |
+| ------ | ----------------------------------------- | ---------------------- | -------- |
+| GET    | `/health/live`                            | 存活检查               | 否       |
+| GET    | `/health/ready`                           | 数据库就绪检查         | 否       |
+| GET    | `/openapi.json`                           | 当前部署的机器可读文档 | 否       |
+| POST   | `/api/v1/ratings/batch`                   | 批量评分查询           | 否       |
+| GET    | `/api/v1/subjects/{id}`                   | 按 ID 查询评分         | 否       |
+| GET    | `/api/v1/subjects/{id}/aliases`           | 列出别名               | 否       |
+| POST   | `/api/v1/admin/subjects/{id}/aliases`     | 添加手动别名           | 是       |
+| PATCH  | `/api/v1/admin/aliases/{aliasId}`         | 修改手动别名           | 是       |
+| DELETE | `/api/v1/admin/aliases/{aliasId}`         | 删除手动别名           | 是       |
+| POST   | `/api/v1/admin/subjects/search`           | 搜索 Bangumi 动画      | 是       |
+| POST   | `/api/v1/admin/subjects/{id}/sync`        | 同步一条动画           | 是       |
+| POST   | `/api/v1/admin/calendar/sync`             | 同步全周放送日历       | 是       |
+| POST   | `/api/v1/admin/import`                    | 导入标准化数据         | 是       |
+| GET    | `/api/v1/admin/export`                    | 分页导出备份           | 是       |
+| POST   | `/api/v1/admin/restore`                   | 恢复单条备份           | 是       |
+| GET    | `/api/v1/admin/stats`                     | 访问热度               | 是       |
+| GET    | `/api/v1/admin/stats/alias-misses`        | 未命中别名统计         | 是       |
+| GET    | `/api/v1/admin/stats/alias-misses/lookup` | 单个未命中别名当前状态 | 是       |
+| PATCH  | `/api/v1/admin/stats/alias-misses`        | 修改处理计划           | 是       |
+| POST   | `/api/v1/admin/stats/prune`               | 清理旧每日统计         | 是       |
+| GET    | `/api/v1/admin/retention`                 | 冷数据预览             | 是       |
+| GET    | `/api/v1/admin/sync-state/{key}`          | 读取检查点             | 是       |
+| PUT    | `/api/v1/admin/sync-state/{key}`          | 保存检查点             | 是       |
 
 ## 服务状态
 
@@ -629,6 +630,24 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
 
 没有结果返回 `aliases=[]`。关闭开关不删除历史记录，仍可读取、修改计划。新增对应别名会清理相同归一化键的未命中记录。非法参数返回 `400 INVALID_INPUT`。大 limit 虽无业务上限，仍受响应大小、内存和平台执行时间约束。
 
+### GET /api/v1/admin/stats/alias-misses/lookup
+
+按名称精确查询当前未命中记录，适合在处理列表快照时复核状态，不受排名或列表 `limit` 影响。
+
+| 查询参数 | 必填 | 说明                                                              |
+| -------- | ---- | ----------------------------------------------------------------- |
+| `name`   | 是   | 去除首尾空白后 1～300 字符，按归一化检索键定位；通过 URL 编码传入 |
+
+```sh
+curl --get 'http://localhost:3000/api/v1/admin/stats/alias-misses/lookup' \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  --data-urlencode 'name=尚未收录的名称'
+```
+
+成功返回 `{"alias": {...}}`，`alias` 的字段与列表中单条记录一致，包含 `planned=false` 的无计划记录。不存在或已被别名写入清理时返回 HTTP 200 和 `{"alias": null}`，不会返回 404。
+
+查询不写入访问统计或未命中统计；即使关闭统计开关，仍可读取历史记录。缺少名称、空白名称或超过长度限制返回 `400 INVALID_INPUT`。管理鉴权失败返回 `401 UNAUTHORIZED`，未配置管理令牌返回 `503 ADMIN_DISABLED`，存储异常返回 `503 SERVICE_UNAVAILABLE`。
+
 ### PATCH /api/v1/admin/stats/alias-misses
 
 | 正文字段  | 类型    | 必填 | 说明                                     |
@@ -842,7 +861,7 @@ OpenAPI 将输入与输出分开：例如 `ImportRequest` 中可省略有默认�
 5. 调用 `POST /api/v1/admin/subjects/{id}/aliases`，以原未命中名称绑定。若已经是上游同名别名则复用，不产生重复手动记录。
 6. 对应未命中记录会自动清理，再次评分查询验证即可。步骤间没有跨请求事务，失败时可依据已完成操作继续。
 
-CLI 的 `resolve-alias-misses` 已封装上述交互和自动精确名称选择，处理数量由调用者决定；具体参数见 [README](../README.md)。
+CLI 的 `resolve-alias-misses` 已封装上述交互和自动精确名称选择，处理数量由调用者决定。搜索（包括换词重搜）前和执行所选写入前，通过 `GET /api/v1/admin/stats/alias-misses/lookup` 复核原名称；已清理或改为无计划时跳过，继续本批下一项。若 PATCH 修改计划时记录刚被清理，仅 `404 ALIAS_MISS_NOT_FOUND` 作为跳过，其他错误仍正常报出。复核与写入之间没有跨请求事务。具体参数和结果说明见 [README](../README.md)。
 
 ### 备份与跨存储迁移
 

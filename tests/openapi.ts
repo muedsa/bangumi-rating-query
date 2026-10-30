@@ -188,11 +188,15 @@ test('OpenAPI 契约：全部操作在真实路由和 SQLite 上返回文档声�
   await request('/api/v1/subjects/100/aliases');
   const misses = await request('/api/v1/admin/stats/alias-misses?planned=true&limit=1000');
   assert.equal(misses.aliases[0].name, '未命中名称');
+  const lookupPath = `/api/v1/admin/stats/alias-misses/lookup?${new URLSearchParams({ name: '未命中名称' })}`;
+  assert.deepEqual((await request(lookupPath)).alias, misses.aliases[0]);
   await request('/api/v1/admin/stats/alias-misses', 'PATCH', {
     name: '未命中名称',
     planned: false,
   });
+  assert.deepEqual((await request(lookupPath)).alias, { ...misses.aliases[0], planned: false });
   const added = await request('/api/v1/admin/subjects/100/aliases', 'POST', { name: '未命中名称' });
+  assert.deepEqual(await request(lookupPath), { alias: null });
   assert.deepEqual((await request('/api/v1/admin/stats/alias-misses')).aliases, []);
   const reused = await request('/api/v1/admin/subjects/100/aliases', 'POST', { name: '动画100' });
   assert.equal(reused.alias.source, 'bangumi');
@@ -250,6 +254,9 @@ test('OpenAPI 契约：校验、鉴权、缺失、冲突及请求体限制错误
     '/api/v1/admin/export?after=-1',
     '/api/v1/admin/stats/alias-misses?planned=TRUE',
     '/api/v1/admin/stats/alias-misses?limit=0',
+    '/api/v1/admin/stats/alias-misses/lookup',
+    '/api/v1/admin/stats/alias-misses/lookup?name=%20',
+    '/api/v1/admin/stats/alias-misses/lookup?name=' + 'a'.repeat(301),
     '/api/v1/admin/retention?days=0',
   ])
     await request(path, 'GET', undefined, 400);

@@ -51,6 +51,7 @@ export interface ApplicationRepository extends AnimeRepository {
   restoreRecord(record: BackupRecord): Promise<void>;
   stats(): Promise<Record<string, unknown>[]>;
   aliasMissStats(planned?: boolean, limit?: number): Promise<AliasMiss[]>;
+  getAliasMiss(name: string): Promise<AliasMiss | null>;
   setAliasMissPlanned(name: string, planned: boolean): Promise<AliasMiss | null>;
   pruneDaily(days: number): Promise<{ deleted: number; hasMore: boolean }>;
   retentionPreview(

@@ -4,6 +4,27 @@ import type { CalendarSyncResult } from '../core/calendar.ts';
 import type { AliasMiss } from '../core/ports.ts';
 import type { LogWriter } from './logger.ts';
 import { subjectSearchResultSchema } from '../core/subject-search.ts';
+import {
+  aliasMissLookupResponseSchema,
+  aliasMissPlanResponseSchema,
+  errorSchema,
+} from '../http/contracts.ts';
+
+class RemoteApiError extends Error {
+  readonly code?: string;
+  constructor(
+    readonly status: number,
+    body: string,
+  ) {
+    super(`管理 API 返回 ${status}: ${body.slice(0, 500)}`);
+    try {
+      const parsed = errorSchema.safeParse(JSON.parse(body));
+      if (parsed.success) this.code = parsed.data.error.code;
+    } catch {
+      // 非 JSON 错误保留原有消息，不能当作特定业务错误处理。
+    }
+  }
+}
 
 interface RemoteTargetOptions {
   requestDelayMs?: number;
@@ -65,9 +86,7 @@ export function remoteTarget(base: string, token: string, options: RemoteTargetO
               : Date.parse(retryAfter) - Date.now();
             retryAfterMs = Number.isNaN(wait) ? 0 : Math.max(0, wait);
           }
-          throw new Error(
-            `管理 API 返回 ${response.status}: ${(await response.text()).slice(0, 500)}`,
-          );
+          throw new RemoteApiError(response.status, await response.text());
         }
         const result = (await response.json()) as T;
         options.log?.('debug', 'api_request_completed', '管理 API 请求完成', {
@@ -168,9 +187,25 @@ export function remoteTarget(base: string, token: string, options: RemoteTargetO
         )
       ).aliases;
     },
-    setAliasMissPlanned: async (name: string, planned: boolean) =>
-      (await request<{ alias: AliasMiss }>('/stats/alias-misses', 'PATCH', { name, planned }))
-        .alias,
+    getAliasMiss: async (name: string) =>
+      aliasMissLookupResponseSchema.parse(
+        await request(`/stats/alias-misses/lookup?${new URLSearchParams({ name })}`),
+      ).alias,
+    setAliasMissPlanned: async (name: string, planned: boolean) => {
+      try {
+        return aliasMissPlanResponseSchema.parse(
+          await request('/stats/alias-misses', 'PATCH', { name, planned }),
+        ).alias;
+      } catch (error) {
+        if (
+          error instanceof RemoteApiError &&
+          error.status === 404 &&
+          error.code === 'ALIAS_MISS_NOT_FOUND'
+        )
+          return null;
+        throw error;
+      }
+    },
     prune: (days: number) => request('/stats/prune', 'POST', { days }),
     retention: (days: number, _enabled: boolean) => request(`/retention?days=${days}`),
     alias: (id: number, name: string) => request(`/subjects/${id}/aliases`, 'POST', { name }),

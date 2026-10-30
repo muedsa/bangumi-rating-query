@@ -117,6 +117,12 @@ const aliasMissSchema = z.object({
   lastMissedAt: timestamp.describe('最近未命中时间（Unix 毫秒）。'),
   planned: z.boolean().describe('是否计划处理，新增时默认为 true；新增未命中不会重置该值。'),
 });
+export const aliasMissLookupResponseSchema = z.object({
+  alias: aliasMissSchema.nullable().describe('当前未命中记录，包含无计划记录；不存在时为 null。'),
+});
+export const aliasMissPlanResponseSchema = z.object({
+  alias: aliasMissSchema.describe('更新处理计划后的记录。'),
+});
 export const responseSchemas = {
   LiveResponse: z.object({ status: z.literal('ok').describe('进程或 Worker 可响应。') }),
   ReadyResponse: z.object({
@@ -186,7 +192,8 @@ export const responseSchemas = {
       .array(aliasMissSchema)
       .describe('先按 planned 筛选，再按次数降序、最近未命中时间降序、检索键升序返回。'),
   }),
-  AliasMissPlanResponse: z.object({ alias: aliasMissSchema.describe('更新处理计划后的记录。') }),
+  AliasMissPlanResponse: aliasMissPlanResponseSchema,
+  AliasMissLookupResponse: aliasMissLookupResponseSchema,
   PruneResponse: z.object({
     deleted: z.number().int().min(0).max(1000).describe('本次删除的每日统计行数，最多 1000。'),
     hasMore: z

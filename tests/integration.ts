@@ -908,17 +908,22 @@ for (const kind of ['node', 'worker', 'postgres'] as const) {
         },
       );
       const summary = JSON.parse(stdout);
-      assert.deepEqual(searched, names.slice(0, 5));
+      assert.deepEqual(searched, names.slice(0, 4));
       assert.equal(synced, 1);
       assert.equal(summary.status, 'completed');
       assert.equal(summary.processed, 5);
-      assert.equal(summary.resolved, 2);
-      assert.equal(summary.skipped, 2);
+      assert.equal(summary.resolved, 1);
+      assert.equal(summary.skipped, 3);
       assert.equal(summary.noCandidates, 1);
       assert.deepEqual(
         summary.results.slice(0, 3).map((r: any) => r.reason),
         ['no_exact_match', 'no_candidates', 'ambiguous_exact_match'],
       );
+      assert.deepEqual(summary.results[4], {
+        name: '中文名',
+        status: 'skipped',
+        reason: 'no_longer_pending',
+      });
       assert(stderr.includes('alias_auto_selected'));
       assert(stderr.includes('alias_auto_skipped'));
       assert(!stderr.includes('选择序号'));
@@ -1190,6 +1195,14 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
     const patch = (body: unknown) =>
       target.fetch(path, { method: 'PATCH', headers, body: JSON.stringify(body) });
+    const lookupPath = `${path}/lookup?${new URLSearchParams({ name: ' ＵＮＫＮＯＷＮ ' })}`;
+    const lookup = async () => {
+      const response = await target.fetch(lookupPath, { headers });
+      const value = await response.json();
+      assert.equal(response.status, 200);
+      assertResponse(openApiDocument, lookupPath, 'GET', 200, value);
+      return (value as any).alias;
+    };
     const stats = async (query = '') => {
       const response = await target.fetch(path + query, { headers });
       assert.equal(response.status, 200);
@@ -1205,6 +1218,11 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       assert.equal((await miss()).status, 200);
       const original = (await stats())[0];
       assert.equal(original.planned, true);
+      assert.equal((await target.fetch(lookupPath)).status, 401);
+      assert.deepEqual(await lookup(), original);
+      assert.deepEqual(await lookup(), original); // 只读复核不会增加 missCount。
+      for (const query of ['', '?name=', '?name=%20', '?name=' + 'a'.repeat(301)])
+        assert.equal((await target.fetch(path + '/lookup' + query, { headers })).status, 400);
       assert.equal((await target.fetch(path, { method: 'PATCH', body: '{}' })).status, 401);
       for (const body of [
         { name: 'unknown' },
@@ -1219,6 +1237,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       assert.equal((await patch({ name: 'unknown', planned: false })).status, 200);
       assert.deepEqual(await stats('?planned=true'), []);
       assert.equal((await stats('?planned=false'))[0].planned, false);
+      assert.deepEqual(await lookup(), { ...original, planned: false });
       assert.equal((await miss()).status, 200);
       const repeated = (await stats())[0];
       assert.equal(repeated.missCount, 2);
@@ -1236,6 +1255,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
         SELECT '无计划'||n,'无计划'||n,1000,1,1,0 FROM nums`);
       assert.equal((await stats()).length, 100);
       assert((await stats()).every((r) => r.planned === false));
+      assert.deepEqual(await lookup(), { ...repeated, planned: true }); // 不在前 100 条也能精确查询。
       assert.deepEqual(
         (await stats('?planned=true')).map((r) => r.normalizedName),
         ['unknown'],
@@ -1248,6 +1268,8 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       });
       assert.equal(imported.status, 200);
       assert.equal((await patch({ name: 'unknown', planned: true })).status, 404);
+      assert.equal(await lookup(), null);
+      assert.deepEqual(await target.sql('SELECT * FROM subject_usage'), []);
       assert.deepEqual(
         await target.sql("SELECT * FROM alias_miss_stats WHERE normalized_name='unknown'"),
         [],
@@ -2480,17 +2502,23 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
           },
         );
       const run = start();
-      run.child.stdin!.end('自定义名称\ninvalid\n2\n2\n-1\n0\nq\n');
+      // 甲导入时顺带清理乙，乙不再占用交互答案；继续标记丙而不中断。
+      run.child.stdin!.end('自定义名称\ninvalid\n2\n-1\n0\nq\n');
       const { stdout, stderr } = await run.catch((error) => {
         throw new Error(`交互 CLI 失败，服务端日志：${target.logs.join('\n')}`, { cause: error });
       });
       const summary = JSON.parse(stdout);
       assert.equal(summary.status, 'stopped');
       assert.equal(summary.total, 5);
-      assert.equal(summary.resolved, 2);
+      assert.equal(summary.resolved, 1);
       assert.equal(summary.noCandidates, 0);
       assert.equal(summary.unplanned, 1);
-      assert.equal(summary.skipped, 1);
+      assert.equal(summary.skipped, 2);
+      assert.deepEqual(summary.results[1], {
+        name: '乙别名',
+        status: 'skipped',
+        reason: 'no_longer_pending',
+      });
       assert.equal(summary.remaining, 1);
       assert.equal(summary.importedSubjects, 1);
       assert(stderr.includes('请输入 1～2'));
@@ -2499,7 +2527,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       assert(!stdout.includes('unused-local-secret'));
       assert.deepEqual(
         requests.filter((r) => r.path === '/v0/search/subjects').map((r) => r.body.keyword),
-        [names[0], '自定义名称', ...names.slice(1, 5)],
+        [names[0], '自定义名称', ...names.slice(2, 5)],
       );
       assert.equal(requests.filter((r) => r.path === '/v0/subjects/802').length, 1);
       const aliases = await target.sql(

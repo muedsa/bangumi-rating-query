@@ -35,6 +35,7 @@ const result: SubjectSearchResult = {
 function setup(names = ['甲', '乙', '丙', '丁']) {
   const events: unknown[] = [];
   const target: AliasReviewTarget = {
+    getAliasMiss: async (name) => miss(name),
     aliasMisses: async (planned) => {
       expect(planned).toBe(true);
       return names.map(miss);
@@ -399,6 +400,160 @@ test('自定义搜索后标记、跳过或退出均不导入，搜索失败保�
       ui: { write() {}, choose: async () => ({ search: '新名称' }) },
     }),
   ).rejects.toThrow('第 1 个别名 "原别名" 处理失败');
+});
+
+test('人工和自动模式跳过被前项清理或改为无计划的记录，继续原批次剩余项', async () => {
+  for (const auto of [false, true]) {
+    for (const removed of [false, true]) {
+      const { target, events } = setup(['A', 'B', 'C']);
+      const pending = new Map(['A', 'B', 'C'].map((name) => [name, miss(name)]));
+      let loaded = false;
+      target.aliasMisses = async () => {
+        expect(loaded).toBe(false); // 不重新拉取按排名截断的列表，也不追加新记录。
+        loaded = true;
+        return [...pending.values()];
+      };
+      target.getAliasMiss = async (name) => pending.get(name) ?? null;
+      target.searchSubjects = async (name) => {
+        events.push(['search', name]);
+        return { total: 1, candidates: [{ ...result.candidates[0]!, name }] };
+      };
+      target.syncSubject = async (id) => {
+        events.push(['sync', id]);
+        pending.delete('A');
+        if (removed) pending.delete('B');
+        else pending.set('B', { ...miss('B'), planned: false });
+        return { imported: id };
+      };
+      const summary = await resolveAliasMisses({
+        target,
+        logger,
+        auto,
+        ui: {
+          write() {},
+          choose: async (miss) => {
+            expect(miss.name).not.toBe('B');
+            return 11;
+          },
+        },
+      });
+      expect(summary).toMatchObject({
+        status: 'completed',
+        total: 3,
+        processed: 3,
+        resolved: 2,
+        skipped: 1,
+        remaining: 0,
+      });
+      expect(summary.results[1]).toEqual({
+        name: 'B',
+        status: 'skipped',
+        reason: 'no_longer_pending',
+      });
+      expect(events).toEqual([
+        ['search', 'A'],
+        ['sync', 11],
+        ['alias', 11, 'A'],
+        ['search', 'C'],
+        ['alias', 11, 'C'],
+      ]);
+    }
+  }
+});
+
+test('交互期间记录失效时不导入、不修改计划、不执行换词搜索', async () => {
+  for (const choice of [11, 'unplanned', { search: '新词' }] as const) {
+    for (const current of [null, { ...miss('A'), planned: false }]) {
+      const { target, events } = setup(['A', 'C']);
+      let changed = false;
+      target.getAliasMiss = async (name) => (name === 'A' && changed ? current : miss(name));
+      const summary = await resolveAliasMisses({
+        target,
+        logger,
+        ui: {
+          write() {},
+          choose: async (miss) => {
+            changed = true;
+            return miss.name === 'A' ? choice : 'unplanned';
+          },
+        },
+      });
+      expect(summary).toMatchObject({
+        status: 'completed',
+        processed: 2,
+        skipped: 1,
+        unplanned: 1,
+        resolved: 0,
+      });
+      expect(events).toEqual([
+        ['search', 'A', 10],
+        ['search', 'C', 10],
+        ['plan', 'C', false],
+      ]);
+      expect(summary.results[0]?.reason).toBe('no_longer_pending');
+    }
+  }
+});
+
+test('自动搜索期间被清理的记录不导入，修改计划的清理竞态同样跳过并继续', async () => {
+  for (const auto of [false, true]) {
+    const { target, events } = setup(['A', 'C']);
+    let searched = false;
+    target.getAliasMiss = async (name) => (auto && searched && name === 'A' ? null : miss(name));
+    target.searchSubjects = async (name) => {
+      searched = true;
+      events.push(['search', name]);
+      return { total: 1, candidates: [{ ...result.candidates[0]!, name }] };
+    };
+    target.setAliasMissPlanned = async (name) =>
+      name === 'A' ? null : { ...miss(name), planned: false };
+    const summary = await resolveAliasMisses({
+      target,
+      logger,
+      auto,
+      ui: { write() {}, choose: async () => 'unplanned' },
+    });
+    expect(summary).toMatchObject({
+      status: 'completed',
+      processed: 2,
+      skipped: 1,
+      resolved: auto ? 1 : 0,
+      unplanned: auto ? 0 : 1,
+    });
+    expect(summary.results[0]).toEqual({
+      name: 'A',
+      status: 'skipped',
+      reason: 'no_longer_pending',
+    });
+    expect(events).not.toContainEqual(['alias', 11, 'A']);
+  }
+});
+
+test('状态复核失败必须停止，复核期间取消不执行后续搜索或写入', async () => {
+  for (const stage of [1, 2]) {
+    for (const cancel of [false, true]) {
+      const { target, events } = setup(['A', 'C']);
+      const controller = new AbortController();
+      let checks = 0;
+      target.getAliasMiss = async (name) => {
+        if (++checks === stage) {
+          if (cancel) controller.abort();
+          else throw new Error('lookup failed');
+        }
+        return miss(name);
+      };
+      const run = resolveAliasMisses({
+        target,
+        logger,
+        signal: controller.signal,
+        ui: { write() {}, choose: async () => 11 },
+      });
+      if (cancel)
+        expect(await run).toMatchObject({ status: 'stopped', processed: 0, remaining: 2 });
+      else await expect(run).rejects.toThrow('第 1 个别名');
+      expect(events).toEqual(stage === 1 ? [] : [['search', 'A', 10]]);
+    }
+  }
 });
 
 test('终端保留提前输入的多行答案，非法序号重问，EOF 停止，移除控制序列', async () => {
