@@ -23,6 +23,8 @@ import {
 } from './sql.ts';
 import { aliasInsertStatements } from './season-aliases.ts';
 import { writeAliases } from './alias-write.ts';
+import { mergeTrends } from './trends.ts';
+import type { TrendsSyncResult } from '../../core/trends.ts';
 
 const subjectColumns = sql`id, name, name_cn AS "nameCn", air_date AS "airDate", platform,
   metadata_at AS "metadataAt", cached_at AS "cachedAt", pinned`;
@@ -70,6 +72,9 @@ export class SqlRepository implements ApplicationRepository {
   }
   async mergeCalendar(input: CalendarSnapshot) {
     await this.writeAliases(() => this.calendarStatements(input));
+  }
+  mergeTrends(records: ImportRecord[], result: TrendsSyncResult) {
+    return mergeTrends(this, records, result);
   }
   private async calendarStatements(input: CalendarSnapshot) {
     const snapshot = calendarSnapshotSchema.parse(input);

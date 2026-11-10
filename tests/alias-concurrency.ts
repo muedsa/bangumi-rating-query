@@ -145,6 +145,54 @@ for (const kind of ['sqlite', 'd1', 'postgres'] as const) {
     ]);
     for (const name of ['日历并发第一季', '日历并发第1季'])
       assert((await first.listAliases(5)).some((a) => a.name === name));
+
+    [first, second] = simultaneousPlans(driver, other);
+    await Promise.all([
+      first.mergeTrends([record(7, '热度并发')], {
+        discovered: 1,
+        attempted: 1,
+        imported: 1,
+        failedIds: [],
+        dataAsOf: new Date(4).toISOString(),
+        status: 'complete',
+      }),
+      second.importRecord(record(8, '热度并发第二季')),
+    ]);
+    for (const name of ['热度并发第一季', '热度并发第1季'])
+      assert((await first.listAliases(7)).some((a) => a.name === name));
+  });
+
+  test(`${kind}: trends 首页 24 条详情采用固定数量批量查询和单次事务`, async (t) => {
+    const { driver, close } = await setup(kind);
+    t.after(close);
+    let reads = 0;
+    let writes = 0;
+    let statements = 0;
+    const repo = new SqlRepository({
+      dialect: driver.dialect,
+      query: (s) => {
+        reads++;
+        return driver.query(s);
+      },
+      batch: (batch) => {
+        writes++;
+        statements = batch.length;
+        return driver.batch(batch);
+      },
+    });
+    const records = Array.from({ length: 24 }, (_, i) => record(1000 + i, `热门动画${i}`));
+    await repo.mergeTrends(records, {
+      discovered: 24,
+      attempted: 24,
+      imported: 24,
+      failedIds: [],
+      dataAsOf: new Date(10).toISOString(),
+      status: 'complete',
+    });
+    assert.equal(reads, 4); // 版本、已有条目、关联别名、别名容量。
+    assert.equal(writes, 1);
+    assert(statements <= 7);
+    assert.equal((await repo.findSubjects(records.map((r) => r.subject.id))).length, 24);
   });
 
   test(`${kind}: 并发修改、删除和备份恢复使旧第一季归属失效，不能误绑`, async (t) => {

@@ -6,8 +6,11 @@ import { SqlRepository } from '../adapters/storage/repository.ts';
 import { readConfig } from '../config.ts';
 import { createApp } from '../http/app.ts';
 import { createBangumiSource } from '../adapters/bangumi/client.ts';
+import { createNodePageRenderer } from '../adapters/bangumi/browser-node.ts';
 import { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import { startCalendarSchedule } from '../scheduling/calendar.ts';
+import { TrendsSyncService } from '../core/trends-sync-service.ts';
+import { startTrendsSchedule } from '../scheduling/trends.ts';
 import { createServerErrorLogger } from '../observability/errors.ts';
 
 if (existsSync('.env')) loadEnvFile('.env');
@@ -22,16 +25,28 @@ const driver = await openStorage(process.env).catch((error) => {
   process.exit(1);
 });
 const repo = new SqlRepository(driver);
-const source = createBangumiSource(config);
+const trendsRenderer =
+  config.TRENDS_FETCH_MODE === 'browser'
+    ? createNodePageRenderer({ timeoutMs: config.TRENDS_BROWSER_TIMEOUT_MS })
+    : undefined;
+const source = createBangumiSource(config, { trendsRenderer });
 const app = createApp(repo, config, {
   subjectSource: source,
   calendarSource: source,
   searchSource: source,
+  trendsSource: source,
 });
 const stopCalendar = config.CALENDAR_SYNC_ENABLED
   ? startCalendarSchedule(
       new CalendarSyncService(repo, source, config.CALENDAR_PLATFORM_BATCH_SIZE),
       config.CALENDAR_SYNC_HOUR_UTC,
+      logError,
+    )
+  : () => {};
+const stopTrends = config.TRENDS_SYNC_ENABLED
+  ? startTrendsSchedule(
+      new TrendsSyncService(repo, source, config.TRENDS_SYNC_LIMIT),
+      config.TRENDS_SYNC_HOUR_UTC,
       logError,
     )
   : () => {};
@@ -49,6 +64,7 @@ const server = serve(
 );
 function shutdown() {
   stopCalendar();
+  stopTrends();
   server.close(() => {
     Promise.resolve(driver.close()).then(
       () => process.exit(0),

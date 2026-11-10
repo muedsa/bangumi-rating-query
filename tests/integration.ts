@@ -35,6 +35,8 @@ import './cli-ui.ts';
 import './backup-recovery.ts';
 import './openapi.ts';
 import './alias-concurrency.ts';
+import './scheduling.ts';
+import { trendsResponse } from './helpers/trends.ts';
 
 const token = 'integration-test-token-with-32-characters';
 const migration = MIGRATIONS.map(({ file }) => readFileSync(`migrations/${file}`, 'utf8')).join(
@@ -647,6 +649,9 @@ async function runtime(
     fetcher: typeof fetch;
     calendarSyncEnabled?: boolean;
     calendarPlatformBatchSize?: number;
+    trendsSyncEnabled?: boolean;
+    trendsSyncHourUtc?: number;
+    trendsSyncLimit?: number;
   },
   aliasMissStatsEnabled = false,
 ) {
@@ -668,6 +673,7 @@ async function runtime(
         STATS_ENABLED: String(enabled),
         ALIAS_MISS_STATS_ENABLED: String(aliasMissStatsEnabled),
         CALENDAR_PLATFORM_BATCH_SIZE: bangumi?.calendarPlatformBatchSize ?? 10,
+        TRENDS_SYNC_LIMIT: bangumi?.trendsSyncLimit ?? 24,
         BANGUMI_USER_AGENT: bangumi?.userAgent ?? '',
         BANGUMI_ACCESS_TOKEN: bangumi?.accessToken ?? '',
       }),
@@ -675,6 +681,7 @@ async function runtime(
         subjectSource: source,
         calendarSource: source,
         searchSource: source,
+        trendsSource: source,
         writeErrorLog: (line) => logs.push(line),
       },
     );
@@ -716,6 +723,11 @@ async function runtime(
               BANGUMI_ACCESS_TOKEN: bangumi.accessToken,
               CALENDAR_SYNC_ENABLED: String(bangumi.calendarSyncEnabled ?? false),
               CALENDAR_PLATFORM_BATCH_SIZE: String(bangumi.calendarPlatformBatchSize ?? 10),
+              TRENDS_SYNC_ENABLED: String(bangumi.trendsSyncEnabled ?? false),
+              TRENDS_SYNC_HOUR_UTC: String(bangumi.trendsSyncHourUtc ?? 21),
+              TRENDS_SYNC_LIMIT: String(bangumi.trendsSyncLimit ?? 24),
+              // 集成测试通过 outboundService 模拟页面，不启动 Browser Rendering。
+              TRENDS_FETCH_MODE: 'http',
             }
           : {}),
       },
@@ -750,7 +762,7 @@ async function runtime(
         `http://localhost${path}`,
         init as Parameters<typeof mf.dispatchFetch>[1],
       )) as unknown as Response,
-    scheduled: async () => (await mf.getWorker()).scheduled({ cron: '0 20 * * *' }),
+    scheduled: async (cron = '0 20 * * *') => (await mf.getWorker()).scheduled({ cron }),
     sql: async (sql: string) => (await db.prepare(sql).all()).results,
     close: () => mf.dispose(),
   };
@@ -3006,6 +3018,205 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       await target.close();
     }
   });
+
+for (const kind of ['node', 'worker', 'postgres'] as const)
+  test(`${kind}: trends 完整详情批量合并、部分失败、重放和故障回滚`, async (t) => {
+    let mode = 'partial';
+    const requests: { url: string; headers: Headers }[] = [];
+    const target = await runtime(
+      kind,
+      true,
+      {
+        userAgent: 'test/trends',
+        accessToken: 'trends-secret',
+        trendsSyncLimit: 4,
+        fetcher: (async (input, init) => {
+          const url = new URL(String(input));
+          requests.push({ url: url.href, headers: new Headers(init?.headers) });
+          if (url.hostname === 'bgm.tv') {
+            if (mode === 'challenge')
+              return new Response('<title>Just a moment...</title>', {
+                headers: { 'Content-Type': 'text/html' },
+              });
+            return trendsResponse();
+          }
+          const id = Number(url.pathname.split('/').at(-1));
+          if (mode === 'all-failed' || (mode === 'partial' && id === 202))
+            return new Response('', { status: 404 });
+          return Response.json({
+            id,
+            type: 2,
+            name: id === 200 ? '季数测试' : id === 201 ? '季数测试第二季' : `详情${id}`,
+            name_cn: `中文${id}`,
+            platform: 'WEB',
+            date: '2026-10-01',
+            infobox: [{ key: '别名', value: `上游别名${id}` }],
+            rating: { score: 8, total: 123, rank: 99 },
+          });
+        }) as typeof fetch,
+      },
+      true,
+    );
+    t.after(() => target.close());
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const sync = () => target.fetch('/api/v1/admin/trends/sync', { method: 'POST', headers });
+    const state = () => target.sql("SELECT value FROM sync_state WHERE key='trends:last_sync'");
+    assert.equal((await target.fetch('/api/v1/admin/trends/sync', { method: 'POST' })).status, 401);
+    assert.equal(requests.length, 0);
+    const initial = fixture(100, '旧详情', ['旧上游名称']);
+    initial.subject.pinned = true;
+    assert.equal(
+      (
+        await target.fetch('/api/v1/admin/import', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(initial),
+        })
+      ).status,
+      200,
+    );
+    await target.fetch('/api/v1/admin/subjects/100/aliases', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ name: '手动保留' }),
+    });
+    await target.sql(
+      "INSERT INTO alias_miss_stats(normalized_name,name,miss_count,first_missed_at,last_missed_at) VALUES('上游别名100','上游别名100',2,1,1)",
+    );
+    const first = await sync();
+    assert.equal(first.status, 200, await first.clone().text());
+    const result = (await first.json()) as any;
+    assertResponse(openApiDocument, '/api/v1/admin/trends/sync', 'POST', 200, result);
+    assert.deepEqual(
+      { ...result, dataAsOf: '' },
+      {
+        discovered: 4,
+        attempted: 4,
+        imported: 3,
+        failedIds: [202],
+        dataAsOf: '',
+        status: 'partial',
+      },
+    );
+    const subject = (
+      await target.sql('SELECT name,platform,pinned,cached_at FROM subjects WHERE id=100')
+    )[0]!;
+    assert.equal(subject.name, '详情100');
+    assert.equal(subject.platform, 'WEB');
+    assert.equal(Number(subject.pinned), 1);
+    assert.equal(subject.cached_at, initial.subject.cachedAt);
+    assert.deepEqual(
+      {
+        ...(
+          await target.sql('SELECT score,votes,rank FROM ratings_current WHERE subject_id=100')
+        )[0],
+      },
+      { score: 8, votes: 123, rank: 99 },
+    );
+    const names = (await target.sql('SELECT name FROM subject_aliases WHERE subject_id=100')).map(
+      (r) => r.name,
+    );
+    assert(
+      names.includes('手动保留') && names.includes('上游别名100') && !names.includes('旧上游名称'),
+    );
+    const seasons = (await target.sql('SELECT name FROM subject_aliases WHERE subject_id=200')).map(
+      (r) => r.name,
+    );
+    assert(seasons.includes('季数测试第一季') && seasons.includes('季数测试第1季'));
+    assert.equal((await target.sql('SELECT * FROM alias_miss_stats')).length, 0);
+    assert.equal((await target.sql('SELECT * FROM subject_usage')).length, 0);
+    assert.equal(requests.length, 5);
+    assert.equal(requests[0]!.headers.has('Authorization'), false);
+    assert(
+      requests.slice(1).every((r) => r.headers.get('Authorization') === 'Bearer trends-secret'),
+    );
+    assert.deepEqual(JSON.parse(String((await state())[0]!.value)), result);
+    const saved = await state();
+    for (const failure of ['challenge', 'all-failed']) {
+      mode = failure;
+      const response = await sync();
+      assert.equal(response.status, 503);
+      assertResponse(
+        openApiDocument,
+        '/api/v1/admin/trends/sync',
+        'POST',
+        503,
+        await response.json(),
+      );
+      assert.deepEqual(await state(), saved);
+    }
+    mode = 'complete';
+    await target.sql(
+      kind === 'postgres'
+        ? "CREATE FUNCTION reject_trends() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id=202 THEN RAISE EXCEPTION 'test'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_trends BEFORE INSERT ON subjects FOR EACH ROW EXECUTE FUNCTION reject_trends()"
+        : "CREATE TRIGGER reject_trends BEFORE INSERT ON subjects WHEN NEW.id=202 BEGIN SELECT RAISE(ABORT, 'test'); END",
+    );
+    const before = await target.sql('SELECT * FROM subjects ORDER BY id');
+    assert.equal((await sync()).status, 503);
+    assert.deepEqual(await target.sql('SELECT * FROM subjects ORDER BY id'), before);
+    assert.deepEqual(await state(), saved);
+    await target.sql(
+      kind === 'postgres' ? 'DROP TRIGGER reject_trends ON subjects' : 'DROP TRIGGER reject_trends',
+    );
+    assert.equal(((await (await sync()).json()) as any).status, 'complete');
+    const aliasCount = (await target.sql('SELECT COUNT(*) AS n FROM subject_aliases'))[0]!.n;
+    await sync();
+    assert.equal((await target.sql('SELECT COUNT(*) AS n FROM subject_aliases'))[0]!.n, aliasCount);
+    // 比抓取时间新的本地版本不会被旧详情覆盖，固定/首次入库字段仍保留。
+    await target.sql(
+      "UPDATE subjects SET name='更新的本地详情',metadata_at=8640000000000000 WHERE id=100",
+    );
+    await target.sql(
+      'UPDATE ratings_current SET score=9,data_as_of=8640000000000000 WHERE subject_id=100',
+    );
+    await sync();
+    assert.equal(
+      (await target.sql('SELECT name FROM subjects WHERE id=100'))[0]!.name,
+      '更新的本地详情',
+    );
+    assert.equal(
+      (await target.sql('SELECT score FROM ratings_current WHERE subject_id=100'))[0]!.score,
+      9,
+    );
+  });
+
+test('Worker trends 和 calendar 按独立 Cron、开关分发，同一时间失败互不阻断', async (t) => {
+  const calls: string[] = [];
+  const make = (enabled: boolean, hour = 21) =>
+    runtime('worker', false, {
+      userAgent: 'tester/trends-cron',
+      accessToken: '',
+      calendarSyncEnabled: true,
+      trendsSyncEnabled: enabled,
+      trendsSyncHourUtc: hour,
+      fetcher: (async (input) => {
+        const url = new URL(String(input));
+        calls.push(url.pathname);
+        if (url.pathname === '/calendar') return new Response('', { status: 401 });
+        if (url.hostname === 'bgm.tv') return trendsResponse([1]);
+        return Response.json({ id: 1, type: 2, name: '热度动画', rating: { score: 0, total: 0 } });
+      }) as typeof fetch,
+    });
+  const enabled = await make(true);
+  t.after(() => enabled.close());
+  assert.equal((await enabled.scheduled!('0 21 * * *')).outcome, 'ok');
+  assert.deepEqual(calls, ['/anime/browser/', '/v0/subjects/1']);
+  calls.length = 0;
+  assert.equal((await enabled.scheduled!('0 20 * * *')).outcome, 'exception');
+  assert.deepEqual(calls, ['/calendar']);
+  calls.length = 0;
+  await enabled.scheduled!('0 22 * * *');
+  assert.deepEqual(calls, []);
+  const disabled = await make(false);
+  t.after(() => disabled.close());
+  await disabled.scheduled!('0 21 * * *');
+  assert.deepEqual(calls, []);
+  const sameHour = await make(true, 20);
+  t.after(() => sameHour.close());
+  assert.equal((await sameHour.scheduled!()).outcome, 'exception');
+  assert.deepEqual(calls, ['/calendar', '/anime/browser/', '/v0/subjects/1']);
+  assert.equal((await sameHour.sql('SELECT id FROM subjects'))[0]!.id, 1);
+});
 
 test('Worker 日历定时开关关闭时不访问上游', async () => {
   let calls = 0;

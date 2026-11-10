@@ -126,6 +126,15 @@ test('OpenAPI 契约：全部操作在真实路由和 SQLite 上返回文档声�
           return 'TV';
         },
       },
+      trendsSource: {
+        async getTrends() {
+          return { subjectIds: [910, 911], fetchedAt: timestamp };
+        },
+        async getSubject(id) {
+          if (failPlatform && id === 911) throw new Error('模拟详情失败');
+          return record(id);
+        },
+      },
     },
   );
   t.after(() => driver.close());
@@ -207,8 +216,12 @@ test('OpenAPI 契约：全部操作在真实路由和 SQLite 上返回文档声�
   const partial = await request('/api/v1/admin/calendar/sync', 'POST');
   assert.equal(partial.status, 'partial');
   assert.deepEqual(partial.platformFailures, [901]);
+  const trends = await request('/api/v1/admin/trends/sync', 'POST');
+  assert.equal(trends.status, 'partial');
+  assert.deepEqual(trends.failedIds, [911]);
   failPlatform = false;
   assert.equal((await request('/api/v1/admin/calendar/sync', 'POST')).status, 'complete');
+  assert.equal((await request('/api/v1/admin/trends/sync', 'POST')).status, 'complete');
   await request('/api/v1/admin/restore', 'POST', backupFixture(200));
   assert((await request('/api/v1/admin/stats')).subjects.length > 0);
   assert((await request('/api/v1/admin/retention?days=1')).candidates.length > 0);
@@ -289,6 +302,7 @@ test('OpenAPI 契约：校验、鉴权、缺失、冲突及请求体限制错误
   await request('/api/v1/admin/subjects/search', 'POST', { keyword: '动画' }, 503);
   await request('/api/v1/admin/subjects/100/sync', 'POST', undefined, 503);
   await request('/api/v1/admin/calendar/sync', 'POST', undefined, 503);
+  await request('/api/v1/admin/trends/sync', 'POST', undefined, 503);
 });
 
 test('OpenAPI 契约：未启用管理、未就绪、存储和上游失败使用声明的 503 错误', async (t) => {

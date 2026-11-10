@@ -24,6 +24,8 @@ jobs:
           --health-retries 10
     env:
       TEST_POSTGRES_URL: postgresql://bangumi_test:integration-test-password@127.0.0.1:5432/bangumi_test
+      # 单元/集成测试使用注入的浏览器替身，CI 不下载 Puppeteer 自带 Chrome。
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2

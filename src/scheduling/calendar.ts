@@ -1,12 +1,8 @@
 import type { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import { createServerErrorLogger, type ServerErrorLogger } from '../observability/errors.ts';
+import { startDailySchedule } from './daily.ts';
 
-export function millisecondsUntilDailyHour(now: number, hourUtc: number): number {
-  const next = new Date(now);
-  next.setUTCHours(hourUtc, 0, 0, 0);
-  if (next.getTime() <= now) next.setUTCDate(next.getUTCDate() + 1);
-  return next.getTime() - now;
-}
+export { millisecondsUntilDailyHour } from './daily.ts';
 
 export async function runCalendarJob(
   sync: Pick<CalendarSyncService, 'sync'>,
@@ -36,26 +32,5 @@ export function startCalendarSchedule(
   hourUtc: number,
   logError?: ServerErrorLogger,
 ) {
-  let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  function schedule() {
-    if (stopped) return;
-    timer = setTimeout(
-      async () => {
-        try {
-          await runCalendarJob(sync, logError);
-        } catch {
-          /* 已记录失败，保留服务运行，下一日重试。 */
-        } finally {
-          schedule();
-        }
-      },
-      millisecondsUntilDailyHour(Date.now(), hourUtc),
-    );
-  }
-  schedule();
-  return () => {
-    stopped = true;
-    if (timer) clearTimeout(timer);
-  };
+  return startDailySchedule(() => runCalendarJob(sync, logError), hourUtc);
 }

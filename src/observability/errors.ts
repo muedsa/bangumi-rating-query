@@ -6,6 +6,7 @@ export interface ErrorContext {
   status?: number;
   code?: string;
   trigger?: 'scheduled';
+  subjectId?: number;
 }
 
 export type ServerErrorLogger = (event: string, error: unknown, context?: ErrorContext) => void;

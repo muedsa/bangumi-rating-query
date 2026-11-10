@@ -130,6 +130,7 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
 | POST   | `/api/v1/admin/subjects/search`           | 搜索 Bangumi 动画      | 是       |
 | POST   | `/api/v1/admin/subjects/{id}/sync`        | 同步一条动画           | 是       |
 | POST   | `/api/v1/admin/calendar/sync`             | 同步全周放送日历       | 是       |
+| POST   | `/api/v1/admin/trends/sync`               | 同步热度榜首页动画详情 | 是       |
 | POST   | `/api/v1/admin/import`                    | 导入标准化数据         | 是       |
 | GET    | `/api/v1/admin/export`                    | 分页导出备份           | 是       |
 | POST   | `/api/v1/admin/restore`                   | 恢复单条备份           | 是       |
@@ -462,6 +463,47 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
 日历摘要保留已有完整详情、手动别名及排名；空 `platform` 只用真实详情回填。别名容量不足时跳过该条目的新增别名，继续合并其他数据。单条详情失败不撤销已导入数据，不要把整个日历同步当作一个可回滚事务。
 
 特有错误：`503 BANGUMI_SYNC_DISABLED`、`BANGUMI_API_ERROR`（日历本身获取失败）；季数生成可能返回 `400 ALIAS_TOO_LONG`。定时部署和日志见 [README](../README.md)。
+
+### POST /api/v1/admin/trends/sync
+
+需要 `Authorization: Bearer <ADMIN_TOKEN>`。无参数、无正文，不受 `TRENDS_SYNC_ENABLED` 定时开关影响；仍需配置 `BANGUMI_USER_AGENT`。抓取 `https://bgm.tv/anime/browser/?sort=trends&page=1`，按列表顺序去重后选取前 `TRENDS_SYNC_LIMIT` 条，从 `/v0/subjects/:id` 获取完整动画详情。默认最多 24 条，允许配置 1～100，不翻页，实际数量不超过首页条目数。
+
+页面默认由 `TRENDS_FETCH_MODE=browser` 的真实浏览器打开，等待 Cloudflare 浏览器验证完成后再解析：Node 使用 Puppeteer，Worker 使用 Browser Rendering 的 `BROWSER` 绑定。等待上限由 `TRENDS_BROWSER_TIMEOUT_MS` 控制，默认 45 秒。设为 `http` 时直接请求页面且不执行 JavaScript，页面返回 403 或验证页时无法同步。
+
+```json
+{
+  "discovered": 24,
+  "attempted": 10,
+  "imported": 9,
+  "failedIds": [101],
+  "dataAsOf": "2026-01-01T00:00:00.000Z",
+  "status": "partial"
+}
+```
+
+| 字段         | 含义                                                              |
+| ------------ | ----------------------------------------------------------------- |
+| `discovered` | 第 1 页去重后的动画数量，不是全站热门动画总数                     |
+| `attempted`  | 本次选取并请求详情的条目数量，最多 `TRENDS_SYNC_LIMIT`            |
+| `imported`   | 成功获取详情并参与合并的数量，不等于新增数量                      |
+| `failedIds`  | 详情获取或校验失败的条目 ID；成功时为空数组                       |
+| `dataAsOf`   | 页面抓取时间，ISO 8601；各条目评分时间取自各自详情请求            |
+| `status`     | `complete`：选中条目全部成功；`partial`：部分详情失败，仍返回 200 |
+
+`attempted = imported + failedIds.length`。`complete` 不表示首页之外或因数量限制未选取的条目也更新了。只要有成功详情，就把这些条目和 `trends:last_sync` 在同一事务中写入。按版本更新元数据、官方别名和完整评分（包括排名），保留手动别名、`cachedAt` 与 `pinned`，补全季数名称并清理未命中记录。不会删除不再热门的条目，不写访问统计。
+
+再次调用会重新抓取首页，未提供失败重试专用游标；重复导入安全，但会产生新的上游请求和数据库操作。可用 `GET /api/v1/admin/sync-state/trends%3Alast_sync` 查询最近成功或部分成功的摘要，`value` 是包含上述结构的 JSON 字符串。失败不覆盖该摘要；请结合日志时间判断。
+
+| 状态 / 错误代码                           | 含义和处理方式                                                                                                  |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `401 UNAUTHORIZED` / `503 ADMIN_DISABLED` | 管理 Token 无效或服务端未启用管理接口                                                                           |
+| `503 BANGUMI_SYNC_DISABLED`               | 服务端未配置上游同步标识                                                                                        |
+| `503 BANGUMI_TRENDS_ERROR`                | 浏览器启动失败、等待验证超时、页面 HTTP/网络错误、验证页、非 HTML、超过 2 MiB、空列表或结构变化；不写入本轮数据 |
+| `503 BANGUMI_API_ERROR`                   | 本轮选中条目的详情全部获取或校验失败；不写入本轮数据                                                            |
+| `400 ALIAS_LIMIT` / `ALIAS_TOO_LONG`      | 详情合并时触发本地别名限制，整批不提交                                                                          |
+| `503 SERVICE_UNAVAILABLE`                 | 数据库或内部故障；本轮事务回滚，按 `X-Request-ID` 排查                                                          |
+
+浏览器模式下页面请求不携带 API Token 或登录 Cookie，页面 User-Agent 为浏览器自身标识而不是 `BANGUMI_USER_AGENT`；详情 API 使用配置的 Bearer Token。`http` 模式直接请求页面时使用 `BANGUMI_USER_AGENT`，但仍可能收到 403。API Token 不能代替浏览器验证。单条失败记录 `trends_subject_failed`（含 `subjectId`），定时整体结果记录 `trends_sync_complete` / `trends_sync_partial` / `trends_sync_failed`。运行时开关、调度时间、浏览器依赖和网站可访问性限制见 [README](../README.md#热度榜-trends-同步)。
 
 ## 导入导出与恢复
 
@@ -811,46 +853,48 @@ OpenAPI 将输入与输出分开：例如 `ImportRequest` 中可省略有默认�
 
 ### 错误码目录
 
-| HTTP | code                      | 原因与处理                                                         |
-| ---- | ------------------------- | ------------------------------------------------------------------ |
-| 400  | `INVALID_INPUT`           | 必填、类型、范围、重复 inputId、备份关联等校验失败；按 issues 修正 |
-| 400  | `INVALID_JSON`            | 请求体缺失或 JSON 语法错误；发送正确 JSON                          |
-| 400  | `BATCH_TOO_LARGE`         | 超过当前 MAX_BATCH_SIZE；拆分批次                                  |
-| 400  | `TOO_MANY_CANDIDATES`     | 名称检索涉及超过 1000 条别名记录；减少名称/批次或改用 ID           |
-| 400  | `ALIAS_LIMIT`             | 自动补充后超过单条目 250 个别名；先整理别名                        |
-| 400  | `ALIAS_TOO_LONG`          | 季数转换后超过 300 字符；缩短名称                                  |
-| 400  | `BACKUP_TOO_LARGE`        | 单条备份超出事务预算；先整理历史统计                               |
-| 401  | `UNAUTHORIZED`            | 管理令牌缺失或不正确；核对 ADMIN_TOKEN                             |
-| 404  | `NOT_FOUND`               | 路径或方法不存在；核对 URL 和 HTTP 方法                            |
-| 404  | `SUBJECT_NOT_FOUND`       | 条目未收录；先导入或同步                                           |
-| 404  | `ALIAS_NOT_FOUND`         | 别名不存在或不是 manual 来源；重新列出别名                         |
-| 404  | `ALIAS_MISS_NOT_FOUND`    | 未命中记录不存在或已自动清理；刷新列表                             |
-| 409  | `ALIAS_EXISTS`            | 修改后与同条目另一名称重复；保留已有名称或选择其他名称             |
-| 409  | `SUBJECT_EXISTS`          | 恢复目标已有条目；核对是否已恢复，更新使用 import/sync             |
-| 413  | `BODY_TOO_LARGE`          | 请求超过 256 KiB；减少正文大小                                     |
-| 503  | `ADMIN_DISABLED`          | 服务端未配置管理令牌；需管理员启用                                 |
-| 503  | `NOT_READY`               | 数据库结构版本不匹配；完成迁移并核对部署版本                       |
-| 503  | `BANGUMI_SEARCH_DISABLED` | 上游搜索未配置；设置 BANGUMI_USER_AGENT                            |
-| 503  | `BANGUMI_SYNC_DISABLED`   | 上游同步未配置；设置 BANGUMI_USER_AGENT                            |
-| 503  | `BANGUMI_API_ERROR`       | 上游网络、认证、限流、404、非动画或响应格式问题；查服务端日志      |
-| 503  | `SERVICE_UNAVAILABLE`     | 存储或其他内部故障；凭 X-Request-ID 查日志                         |
-| 503  | `CONFIGURATION_ERROR`     | Worker 配置/初始化失败；核对环境配置和绑定                         |
+| HTTP | code                      | 原因与处理                                                                     |
+| ---- | ------------------------- | ------------------------------------------------------------------------------ |
+| 400  | `INVALID_INPUT`           | 必填、类型、范围、重复 inputId、备份关联等校验失败；按 issues 修正             |
+| 400  | `INVALID_JSON`            | 请求体缺失或 JSON 语法错误；发送正确 JSON                                      |
+| 400  | `BATCH_TOO_LARGE`         | 超过当前 MAX_BATCH_SIZE；拆分批次                                              |
+| 400  | `TOO_MANY_CANDIDATES`     | 名称检索涉及超过 1000 条别名记录；减少名称/批次或改用 ID                       |
+| 400  | `ALIAS_LIMIT`             | 自动补充后超过单条目 250 个别名；先整理别名                                    |
+| 400  | `ALIAS_TOO_LONG`          | 季数转换后超过 300 字符；缩短名称                                              |
+| 400  | `BACKUP_TOO_LARGE`        | 单条备份超出事务预算；先整理历史统计                                           |
+| 401  | `UNAUTHORIZED`            | 管理令牌缺失或不正确；核对 ADMIN_TOKEN                                         |
+| 404  | `NOT_FOUND`               | 路径或方法不存在；核对 URL 和 HTTP 方法                                        |
+| 404  | `SUBJECT_NOT_FOUND`       | 条目未收录；先导入或同步                                                       |
+| 404  | `ALIAS_NOT_FOUND`         | 别名不存在或不是 manual 来源；重新列出别名                                     |
+| 404  | `ALIAS_MISS_NOT_FOUND`    | 未命中记录不存在或已自动清理；刷新列表                                         |
+| 409  | `ALIAS_EXISTS`            | 修改后与同条目另一名称重复；保留已有名称或选择其他名称                         |
+| 409  | `SUBJECT_EXISTS`          | 恢复目标已有条目；核对是否已恢复，更新使用 import/sync                         |
+| 413  | `BODY_TOO_LARGE`          | 请求超过 256 KiB；减少正文大小                                                 |
+| 503  | `ADMIN_DISABLED`          | 服务端未配置管理令牌；需管理员启用                                             |
+| 503  | `NOT_READY`               | 数据库结构版本不匹配；完成迁移并核对部署版本                                   |
+| 503  | `BANGUMI_SEARCH_DISABLED` | 上游搜索未配置；设置 BANGUMI_USER_AGENT                                        |
+| 503  | `BANGUMI_SYNC_DISABLED`   | 上游同步未配置；设置 BANGUMI_USER_AGENT                                        |
+| 503  | `BANGUMI_API_ERROR`       | 上游网络、认证、限流、404、非动画或响应格式问题；查服务端日志                  |
+| 503  | `BANGUMI_TRENDS_ERROR`    | 浏览器启动失败、验证超时、页面请求失败、验证页、空列表或结构变化；查服务端日志 |
+| 503  | `SERVICE_UNAVAILABLE`     | 存储或其他内部故障；凭 X-Request-ID 查日志                                     |
+| 503  | `CONFIGURATION_ERROR`     | Worker 配置/初始化失败；核对环境配置和绑定                                     |
 
 ### 如何重试
 
 当前服务没有通用幂等键或事务查询接口。不要对全部失败无限重试；配置、鉴权、校验错误应先修正。临时网络故障或 503 可采用有限次数的退避延迟；503 也可能是永久配置或上游数据问题。
 
-| 操作                 | 响应丢失或重试的影响                                       |
-| -------------------- | ---------------------------------------------------------- |
-| 评分查询             | 数据结果不被修改，但启用统计时重试会再次计数               |
-| 同版本 import        | 版本保护允许安全重放；成功不等于此次实际更新               |
-| 添加同名别名         | 复用已有记录；先核对来源与冲突结果                         |
-| 修改别名             | 可能已写入但后续冲突读取失败，先查询当前别名               |
-| 删除别名             | 已删除后重复调用返回 404；先核对目标 ID                    |
-| 单条 sync / calendar | 会重新请求上游；日历已完成部分不会回滚，partial 可继续调用 |
-| restore              | 已恢复后重复请求返回 409；必须核对备份内容再继续           |
-| prune                | 可重复调用，持续删除满足条件的旧每日行                     |
-| 检查点 PUT           | 覆盖同名值；不要因延迟重试把更新的检查点倒退               |
+| 操作                 | 响应丢失或重试的影响                                                                     |
+| -------------------- | ---------------------------------------------------------------------------------------- |
+| 评分查询             | 数据结果不被修改，但启用统计时重试会再次计数                                             |
+| 同版本 import        | 版本保护允许安全重放；成功不等于此次实际更新                                             |
+| 添加同名别名         | 复用已有记录；先核对来源与冲突结果                                                       |
+| 修改别名             | 可能已写入但后续冲突读取失败，先查询当前别名                                             |
+| 删除别名             | 已删除后重复调用返回 404；先核对目标 ID                                                  |
+| 单条 sync / calendar | 会重新请求上游；日历已完成部分不会回滚，partial 可继续调用                               |
+| trends               | 重新获取当前首页与详情，成功数据按版本合并；每轮成功/部分成功摘要覆盖 `trends:last_sync` |
+| restore              | 已恢复后重复请求返回 409；必须核对备份内容再继续                                         |
+| prune                | 可重复调用，持续删除满足条件的旧每日行                                                   |
+| 检查点 PUT           | 覆盖同名值；不要因延迟重试把更新的检查点倒退                                             |
 
 ## 常见工作流
 

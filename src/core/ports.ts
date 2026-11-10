@@ -1,6 +1,7 @@
 import type { Alias, ImportRecord, Rating, Subject } from './models.ts';
 import type { BackupPage, BackupRecord } from './backup.ts';
 import type { CalendarSnapshot } from './calendar.ts';
+import type { TrendsSnapshot, TrendsSyncResult } from './trends.ts';
 import type { SubjectSearchResult } from './subject-search.ts';
 
 export interface AliasMiss {
@@ -25,6 +26,15 @@ export interface CalendarSource {
   getSubjectPlatform(id: number): Promise<string>;
 }
 
+export interface TrendsSource extends SubjectSource {
+  getTrends(): Promise<TrendsSnapshot>;
+}
+
+/** 用真实浏览器打开页面并返回渲染后的 HTML，用于通过 Cloudflare 浏览器验证。 */
+export interface PageRenderer {
+  render(url: string): Promise<string>;
+}
+
 export interface AnimeRepository {
   ready(): Promise<boolean>;
   findSubjects(ids: number[]): Promise<Subject[]>;
@@ -43,6 +53,7 @@ export interface AnimeRepository {
 /** HTTP 层依赖完整业务存储契约，而不是具体 SQL 驱动。 */
 export interface ApplicationRepository extends AnimeRepository {
   mergeCalendar(snapshot: CalendarSnapshot): Promise<void>;
+  mergeTrends(records: ImportRecord[], result: TrendsSyncResult): Promise<void>;
   findMissingPlatformIds(ids: number[]): Promise<number[]>;
   fillPlatforms(items: { id: number; platform: string }[]): Promise<number>;
   getState(key: string): Promise<string | null>;

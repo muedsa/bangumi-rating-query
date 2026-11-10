@@ -12,10 +12,12 @@ import type {
   CalendarSource,
   SubjectSource,
   SubjectSearchSource,
+  TrendsSource,
 } from '../core/ports.ts';
 import { searchSubjects, subjectSearchRequestSchema } from '../core/subject-search.ts';
 import { SubjectSyncService } from '../core/sync-service.ts';
 import { CalendarSyncService } from '../core/calendar-sync-service.ts';
+import { TrendsSyncService } from '../core/trends-sync-service.ts';
 import { backupSchema } from '../core/backup.ts';
 import type { Config } from '../config.ts';
 import { getOpenApi } from './openapi.ts';
@@ -35,6 +37,7 @@ export function createApp(
     subjectSource?: SubjectSource;
     calendarSource?: CalendarSource;
     searchSource?: SubjectSearchSource;
+    trendsSource?: TrendsSource;
     writeErrorLog?: (line: string) => void;
   } = {},
 ) {
@@ -54,6 +57,11 @@ export function createApp(
     repo,
     dependencies.calendarSource,
     config.CALENDAR_PLATFORM_BATCH_SIZE,
+  );
+  const trendsSync = new TrendsSyncService(
+    repo,
+    dependencies.trendsSource,
+    config.TRENDS_SYNC_LIMIT,
   );
   const service = new QueryService(repo, {
     statsEnabled: config.STATS_ENABLED,
@@ -152,6 +160,16 @@ export function createApp(
     return c.json(await searchSubjects(dependencies.searchSource, keyword, limit));
   });
   app.post('/api/v1/admin/calendar/sync', async (c) => c.json(await calendarSync.sync()));
+  app.post('/api/v1/admin/trends/sync', async (c) =>
+    c.json(
+      await trendsSync.sync((subjectId, error) =>
+        logError('trends_subject_failed', error, {
+          ...requestErrorContext(c.req.raw, routePath(c) || '[unmatched]', c.get('requestId')),
+          subjectId,
+        }),
+      ),
+    ),
+  );
   app.post('/api/v1/admin/subjects/:id/sync', async (c) => {
     const id = positiveId.parse(Number(c.req.param('id')));
     return c.json(await syncService.sync(id));

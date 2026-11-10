@@ -8,6 +8,7 @@ import {
 } from '../core/models.ts';
 import { backupSchema } from '../core/backup.ts';
 import { calendarSyncResultSchema } from '../core/calendar.ts';
+import { trendsSyncResultSchema } from '../core/trends.ts';
 import { subjectSearchRequestSchema, subjectSearchResultSchema } from '../core/subject-search.ts';
 import {
   aliasBodySchema,
@@ -182,6 +183,7 @@ export function getOpenApi(maxBatchSize: number) {
     OpenApiDocument: openApiDocumentSchema,
     ...responseSchemas,
     CalendarSyncResponse: calendarSyncResultSchema,
+    TrendsSyncResponse: trendsSyncResultSchema,
     SearchResponse: subjectSearchResultSchema,
   };
   const inputSchemas = {
@@ -532,6 +534,43 @@ export function getOpenApi(maxBatchSize: number) {
             }),
           },
           errors: ['BANGUMI_SYNC_DISABLED', 'BANGUMI_API_ERROR', 'ALIAS_TOO_LONG'],
+        }),
+      },
+      '/api/v1/admin/trends/sync': {
+        post: op({
+          operationId: 'syncBangumiTrends',
+          tag: '上游同步',
+          admin: true,
+          summary: '同步热度榜首页动画详情和评分',
+          description:
+            '无参数、无请求正文；手动调用不受 TRENDS_SYNC_ENABLED 控制。页面默认由 TRENDS_FETCH_MODE=browser 的真实浏览器打开并等待 Cloudflare 验证完成（Node 用 Puppeteer，Worker 用 BROWSER 绑定的 Browser Rendering），超时由 TRENDS_BROWSER_TIMEOUT_MS 控制；抓取 https://bgm.tv/anime/browser/?sort=trends&page=1，按顺序去重后选取前 TRENDS_SYNC_LIMIT 条（默认 24，允许 1～100，不翻页），逐条从 API 获取完整动画详情。浏览器页面不携带 Access Token，详情 API 使用配置的 Bearer Token。成功详情和 trends:last_sync 在同一事务合并；保留手动别名、首次入库时间和固定标记，按版本更新评分与官方别名。部分详情失败仍返回 200 partial；全部详情失败返回 503 BANGUMI_API_ERROR。页面失败或存储失败不写入本轮数据。同步不计用户访问；重复调用会重新抓取，不是断点续跑。',
+          response: 'TrendsSyncResponse',
+          success: '检查 status 和 failedIds；complete 仅表示本次选取的条目全部成功。',
+          examples: {
+            complete: example({
+              discovered: 24,
+              attempted: 2,
+              imported: 2,
+              failedIds: [],
+              dataAsOf: '2026-01-01T00:00:00.000Z',
+              status: 'complete',
+            }),
+            partial: example({
+              discovered: 24,
+              attempted: 2,
+              imported: 1,
+              failedIds: [101],
+              dataAsOf: '2026-01-01T00:00:00.000Z',
+              status: 'partial',
+            }),
+          },
+          errors: [
+            'BANGUMI_SYNC_DISABLED',
+            'BANGUMI_TRENDS_ERROR',
+            'BANGUMI_API_ERROR',
+            'ALIAS_LIMIT',
+            'ALIAS_TOO_LONG',
+          ],
         }),
       },
       '/api/v1/admin/import': {

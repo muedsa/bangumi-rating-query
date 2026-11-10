@@ -10,10 +10,14 @@
     "node": ">=24.12.0",
     "bun": ">=1.4.3"
   },
+  "trustedDependencies": [
+    "puppeteer"
+  ],
   "scripts": {
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
+    "browser:install": "puppeteer browsers install chrome",
     "build": "bun run build:node && bun run build:worker",
     "build:node": "bun build src/entrypoints/node.ts src/entrypoints/cli.ts --target=node --outdir=dist/node",
     "build:worker": "bun build src/entrypoints/worker.ts --target=browser --outfile=dist/worker.js",
@@ -32,14 +36,17 @@
   "dependencies": {
     "@bgm38/wiki": "^0.3.3",
     "@clack/prompts": "^1.8.1",
+    "@cloudflare/puppeteer": "^1.4.0",
     "@hono/node-server": "^2.1.5",
     "chalk": "^6.0.1",
     "commander": "^15.0.0",
     "drizzle-orm": "^0.45.4",
     "fflate": "^0.8.3",
     "hono": "^4.13.13",
+    "htmlparser2": "^12.0.0",
     "ora": "^9.4.1",
     "postgres": "^3.4.9",
+    "puppeteer": "^25.16.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

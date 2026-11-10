@@ -93,7 +93,13 @@ export const apiErrors = {
   BANGUMI_SYNC_DISABLED: {
     status: 503,
     message: '请在服务端配置 BANGUMI_USER_AGENT 以启用同步',
-    description: '未配置上游条目或日历同步服务。',
+    description: '未配置上游条目、日历或热度同步服务。',
+  },
+  BANGUMI_TRENDS_ERROR: {
+    status: 503,
+    message: 'Bangumi 热度页面获取、验证或解析失败，请稍后重试',
+    description:
+      '浏览器启动失败、等待 Cloudflare 验证超时、热度页面请求失败、返回验证页、空列表、过大响应或页面结构变化；不写入本轮数据或覆盖上轮结果。',
   },
   BANGUMI_API_ERROR: {
     status: 503,
