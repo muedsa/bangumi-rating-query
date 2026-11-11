@@ -162,7 +162,7 @@ for (const kind of ['sqlite', 'd1', 'postgres'] as const) {
       assert((await first.listAliases(7)).some((a) => a.name === name));
   });
 
-  test(`${kind}: trends 首页 24 条详情采用固定数量批量查询和单次事务`, async (t) => {
+  test(`${kind}: trends 24 条详情采用固定数量批量查询和单次事务`, async (t) => {
     const { driver, close } = await setup(kind);
     t.after(close);
     let reads = 0;

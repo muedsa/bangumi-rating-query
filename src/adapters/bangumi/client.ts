@@ -1,20 +1,17 @@
 import { fromApi, fromApiPlatform, fromCalendar, fromSearch } from './parse.ts';
 import type {
   CalendarSource,
-  PageRenderer,
   SubjectSource,
   SubjectSearchSource,
   TrendsSource,
 } from '../../core/ports.ts';
-import { assertTrendsHtmlSize, fromTrendsHtml, readTrendsHtml, TRENDS_URL } from './trends.ts';
+import { fromTrendsSearchPage, trendsSearchBody } from './trends.ts';
 import { subjectSearchRequestSchema } from '../../core/subject-search.ts';
 
 interface BangumiClientOptions {
   accessToken?: string;
   fetcher?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
-  trendsRenderer?: PageRenderer;
-  trendsFetchMode?: 'http' | 'browser';
 }
 
 export class BangumiClient
@@ -23,8 +20,6 @@ export class BangumiClient
   private readonly accessToken: string;
   private readonly fetcher: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
-  private readonly trendsRenderer?: PageRenderer;
-  private readonly trendsFetchMode: 'http' | 'browser';
 
   constructor(
     private userAgent: string,
@@ -34,8 +29,6 @@ export class BangumiClient
     this.accessToken = options.accessToken?.trim() ?? '';
     this.fetcher = options.fetcher ?? fetch;
     this.sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-    this.trendsRenderer = options.trendsRenderer;
-    this.trendsFetchMode = options.trendsFetchMode ?? (options.trendsRenderer ? 'browser' : 'http');
   }
   async getSubject(id: number) {
     const record = fromApi(await this.request(`/v0/subjects/${id}`));
@@ -59,38 +52,44 @@ export class BangumiClient
   async getSubjectPlatform(id: number) {
     return fromApiPlatform(await this.request(`/v0/subjects/${id}`), id);
   }
-  async getTrends() {
-    if (this.trendsFetchMode === 'browser') {
-      if (!this.trendsRenderer) throw new Error('TRENDS_FETCH_MODE=browser 但未配置浏览器渲染器');
-      const html = await this.trendsRenderer.render(TRENDS_URL);
-      assertTrendsHtmlSize(html);
-      // 浏览器已通过验证但页面结构变化时，仍交给同一解析器拒绝空列表。
-      return fromTrendsHtml(html);
+  async getTrends(limit = 24) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+      throw new Error('热度同步条目数量必须为 1～100 的整数');
+    const now = Date.now();
+    const body = trendsSearchBody(now);
+    const ids = new Set<number>();
+    let offset = 0;
+    // 上游单页最多 20 条；按原始结果数推进，重复 ID 不额外扩展抓取预算。
+    while (offset < limit) {
+      const pageSize = Math.min(20, limit - offset);
+      const page = fromTrendsSearchPage(
+        await this.request(`/v0/search/subjects?limit=${pageSize}&offset=${offset}`, body),
+      );
+      if (page.data.length > pageSize) throw new Error('Bangumi 搜索结果超过请求数量');
+      for (const item of page.data) ids.add(item.id);
+      offset += page.data.length;
+      if (!page.data.length || offset >= page.total) break;
     }
-    return fromTrendsHtml(await readTrendsHtml(await this.requestResponse(TRENDS_URL, false)));
+    return { subjectIds: [...ids], fetchedAt: now };
   }
   private async request(path: string, body?: unknown): Promise<unknown> {
-    return (await this.requestResponse(`https://api.bgm.tv${path}`, true, body)).json();
-  }
-  private async requestResponse(url: string, api: boolean, body?: unknown): Promise<Response> {
     // Workers 的全局 fetch 不能以客户端实例作为 this 调用。
     const fetcher = this.fetcher;
     for (let attempt = 0; attempt < 3; attempt++) {
       const headers = new Headers({
         'User-Agent': this.userAgent,
-        Accept: api ? 'application/json' : 'text/html',
+        Accept: 'application/json',
       });
-      // Access Token 只发送给 API；网页抓取不携带 Token 或登录 Cookie。
-      if (api && this.accessToken) headers.set('Authorization', `Bearer ${this.accessToken}`);
+      if (this.accessToken) headers.set('Authorization', `Bearer ${this.accessToken}`);
       if (body !== undefined) headers.set('Content-Type', 'application/json');
-      const response = await fetcher(url, {
+      const response = await fetcher(`https://api.bgm.tv${path}`, {
         headers,
         ...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }),
         // Worker 不支持 redirect=error；不跟随跳转，并在下方按非成功状态拒绝。
         redirect: 'manual',
         signal: AbortSignal.timeout(15000),
       });
-      if (response.ok) return response;
+      if (response.ok) return response.json();
       await response.body?.cancel();
       if (![429, 500, 502, 503, 504].includes(response.status) || attempt === 2)
         throw new Error(`Bangumi 返回 HTTP ${response.status}`);
@@ -109,19 +108,13 @@ export class BangumiClient
   }
 }
 
-export function createBangumiSource(
-  config: {
-    BANGUMI_USER_AGENT: string;
-    BANGUMI_ACCESS_TOKEN: string;
-    TRENDS_FETCH_MODE?: 'http' | 'browser';
-  },
-  options: { trendsRenderer?: PageRenderer } = {},
-): BangumiClient | undefined {
+export function createBangumiSource(config: {
+  BANGUMI_USER_AGENT: string;
+  BANGUMI_ACCESS_TOKEN: string;
+}): BangumiClient | undefined {
   return config.BANGUMI_USER_AGENT
     ? new BangumiClient(config.BANGUMI_USER_AGENT, {
         accessToken: config.BANGUMI_ACCESS_TOKEN,
-        trendsRenderer: options.trendsRenderer,
-        trendsFetchMode: config.TRENDS_FETCH_MODE,
       })
     : undefined;
 }

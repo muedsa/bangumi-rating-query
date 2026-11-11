@@ -3,11 +3,6 @@
   "name": "bangumi-rating-query",
   "main": "src/entrypoints/worker.ts",
   "compatibility_date": "2026-10-20",
-  // @cloudflare/puppeteer 的 ESM 构建使用 node:buffer；Browser Rendering 由下方 browser 绑定提供。
-  "compatibility_flags": ["nodejs_compat"],
-  "browser": {
-    "binding": "BROWSER",
-  },
   "workers_dev": true,
   "upload_source_maps": true,
   "vars": {
@@ -22,8 +17,6 @@
     "TRENDS_SYNC_ENABLED": "true",
     "TRENDS_SYNC_HOUR_UTC": "21",
     "TRENDS_SYNC_LIMIT": "24",
-    "TRENDS_FETCH_MODE": "browser",
-    "TRENDS_BROWSER_TIMEOUT_MS": "45000",
   },
   "triggers": {
     // 修改小时配置时需同步修改这里的 UTC Cron；两个任务各自匹配对应的表达式。

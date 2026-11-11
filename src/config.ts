@@ -21,8 +21,6 @@ const configSchema = z.object({
   TRENDS_SYNC_ENABLED: bool,
   TRENDS_SYNC_HOUR_UTC: z.coerce.number().int().min(0).max(23).default(21),
   TRENDS_SYNC_LIMIT: z.coerce.number().int().min(1).max(100).default(24),
-  TRENDS_FETCH_MODE: z.enum(['http', 'browser']).default('browser'),
-  TRENDS_BROWSER_TIMEOUT_MS: z.coerce.number().int().min(5000).max(120000).default(45000),
 });
 export function readConfig(env: Record<string, unknown>) {
   return configSchema.parse(env);

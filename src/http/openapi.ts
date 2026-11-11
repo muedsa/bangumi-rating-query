@@ -541,14 +541,22 @@ export function getOpenApi(maxBatchSize: number) {
           operationId: 'syncBangumiTrends',
           tag: '上游同步',
           admin: true,
-          summary: '同步热度榜首页动画详情和评分',
+          summary: '同步最近半年的热门动画详情和评分',
           description:
-            '无参数、无请求正文；手动调用不受 TRENDS_SYNC_ENABLED 控制。页面默认由 TRENDS_FETCH_MODE=browser 的真实浏览器打开并等待 Cloudflare 验证完成（Node 用 Puppeteer，Worker 用 BROWSER 绑定的 Browser Rendering），超时由 TRENDS_BROWSER_TIMEOUT_MS 控制；抓取 https://bgm.tv/anime/browser/?sort=trends&page=1，按顺序去重后选取前 TRENDS_SYNC_LIMIT 条（默认 24，允许 1～100，不翻页），逐条从 API 获取完整动画详情。浏览器页面不携带 Access Token，详情 API 使用配置的 Bearer Token。成功详情和 trends:last_sync 在同一事务合并；保留手动别名、首次入库时间和固定标记，按版本更新评分与官方别名。部分详情失败仍返回 200 partial；全部详情失败返回 503 BANGUMI_API_ERROR。页面失败或存储失败不写入本轮数据。同步不计用户访问；重复调用会重新抓取，不是断点续跑。',
+            '无参数、无请求正文；手动调用不受 TRENDS_SYNC_ENABLED 控制。通过 POST /v0/search/subjects，以空 keyword、sort=heat（收藏人数排序）、filter.type=[2] 搜索。filter.air_date 为 UTC 当天向前六个日历月，包含起止日；月底截短至目标月末，排除未来日期。例如 2026-11-11 使用 [">=2026-05-11", "<2026-11-12"]。最多读取 TRENDS_SYNC_LIMIT 条（默认 24，允许 1～100），每页最多 20 条自动分页；按原始结果数推进，重复 ID 去重且不补齐。所有搜索分页成功后，依次获取完整详情。搜索和详情均使用配置的 Bearer Token。成功详情和 trends:last_sync 在同一事务合并，保留手动别名、首次入库时间和固定标记，按版本更新评分与官方别名。部分详情失败返回 200 partial；全部详情失败返回 503 BANGUMI_API_ERROR；搜索分页失败返回 503 BANGUMI_TRENDS_ERROR，存储失败回滚。空搜索返回 200 complete，数量均为 0，只保存摘要。同步不计用户访问，不删除旧条目；重复调用重新搜索，不是断点续跑。',
           response: 'TrendsSyncResponse',
-          success: '检查 status 和 failedIds；complete 仅表示本次选取的条目全部成功。',
+          success: '检查 status 和 failedIds；complete 表示本次选取条目全部成功或搜索无结果。',
           examples: {
+            empty: example({
+              discovered: 0,
+              attempted: 0,
+              imported: 0,
+              failedIds: [],
+              dataAsOf: '2026-01-01T00:00:00.000Z',
+              status: 'complete',
+            }),
             complete: example({
-              discovered: 24,
+              discovered: 2,
               attempted: 2,
               imported: 2,
               failedIds: [],
@@ -556,7 +564,7 @@ export function getOpenApi(maxBatchSize: number) {
               status: 'complete',
             }),
             partial: example({
-              discovered: 24,
+              discovered: 2,
               attempted: 2,
               imported: 1,
               failedIds: [101],

@@ -97,9 +97,9 @@ export const apiErrors = {
   },
   BANGUMI_TRENDS_ERROR: {
     status: 503,
-    message: 'Bangumi 热度页面获取、验证或解析失败，请稍后重试',
+    message: 'Bangumi 近期热门动画搜索或校验失败，请稍后重试',
     description:
-      '浏览器启动失败、等待 Cloudflare 验证超时、热度页面请求失败、返回验证页、空列表、过大响应或页面结构变化；不写入本轮数据或覆盖上轮结果。',
+      '近期热门动画搜索分页请求失败、非 JSON 或响应字段校验失败；不写入本轮数据或覆盖上轮结果。空搜索结果属于成功。',
   },
   BANGUMI_API_ERROR: {
     status: 503,

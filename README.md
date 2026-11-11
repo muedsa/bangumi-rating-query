@@ -24,7 +24,7 @@
 - 提供 [AI 辅助人工审核技能](#ai-辅助人工审核技能)，先整理未命中名称的候选，再按用户决定导入、绑定或调整处理计划。
 - Archive 下载、SHA-256 校验、流式解压、分批断点导入，以及单条目 API 更新。
 - Bangumi calendar 全周日历批量导入，支持管理接口、CLI、Worker Cron 和 Node 每日调度。
-- Bangumi trends 热度榜首页同步，通过 Puppeteer 浏览器完成 Cloudflare 验证并获取完整动画详情、别名和评分，支持独立的管理接口、Worker Cron 和 Node 每日调度。
+- Bangumi 近期热门动画同步，通过搜索 API 按收藏人数排序筛选最近半年的动画，获取完整详情、别名和评分，支持独立的管理接口、Worker Cron 和 Node 每日调度。
 - 版本化 JSONL 备份恢复，支持 D1、SQLite、PostgreSQL 之间迁移，保留手动别名与统计。
 - 冷数据预览、每日统计清理；首版不自动淘汰条目。
 - `/openapi.json` 提供 OpenAPI 3.1 文档，无前端页面。
@@ -121,9 +121,7 @@ bun run deploy:worker
 
 `ADMIN_TOKEN` 和 `BANGUMI_ACCESS_TOKEN` 均通过 Cloudflare **Secret（加密变量）** 配置，不放入 `vars`。命令会提示输入值，Bangumi Token 填原始值，不加 `Bearer `。控制台也可在 Worker 的 **Settings → Variables and Secrets → Add → Secret** 中添加同名变量。需要单条目在线更新时，将 `vars.BANGUMI_USER_AGENT` 填成自己的开发者/应用标识，然后部署。Bangumi Token 可选，不配置时使用匿名请求。
 
-`wrangler.jsonc` 已启用 `compatibility_flags: ["nodejs_compat"]`，并绑定 Browser Rendering：`"browser": { "binding": "BROWSER" }`。热度同步默认通过该绑定启动远端浏览器完成 Cloudflare 验证；账号或套餐不支持 Browser Rendering 时，部署会拒绝该绑定，可先设置 `TRENDS_FETCH_MODE="http"` 并停用热度定时任务。Browser Rendering 依赖远端资源，`wrangler dev` 调试热度同步时请使用 `--remote`（或部署后验证），本地需要直连页面时改用 `TRENDS_FETCH_MODE=http`。
-
-`wrangler.jsonc` 已配置两条每日 Cron：`0 20 * * *` 在 **20:00 UTC（北京时间次日 04:00）** 导入全周 calendar，`0 21 * * *` 在 **21:00 UTC（北京时间次日 05:00）** 同步 trends 热度榜首页。`CALENDAR_SYNC_ENABLED="false"` 和 `TRENDS_SYNC_ENABLED="false"` 分别停用对应任务，手动接口仍可用。修改时间时，同步修改 `triggers.crons` 和对应的 `*_SYNC_HOUR_UTC` 小时变量，然后重新部署。
+`wrangler.jsonc` 已配置两条每日 Cron：`0 20 * * *` 在 **20:00 UTC（北京时间次日 04:00）** 导入全周 calendar，`0 21 * * *` 在 **21:00 UTC（北京时间次日 05:00）** 同步 trends 近期热门动画。`CALENDAR_SYNC_ENABLED="false"` 和 `TRENDS_SYNC_ENABLED="false"` 分别停用对应任务，手动接口仍可用。修改时间时，同步修改 `triggers.crons` 和对应的 `*_SYNC_HOUR_UTC` 小时变量，然后重新部署。
 
 本地 Worker 开发：
 
@@ -143,8 +141,6 @@ docker compose up --build -d
 ```
 
 Compose 从本地 `.env` 读取管理令牌等配置，使用持久化命名卷保存数据库。默认只将端口发布到宿主机 `127.0.0.1:3000`，可由反向代理提供 HTTPS。
-
-Node 镜像内置 Debian Chromium 及其运行库，供 trends 的 `browser` 模式启动，因此镜像明显大于纯 API 版本。容器内自动以 `--no-sandbox` 运行 Chromium；浏览器用户目录默认在数据卷的 `/app/data/browser-profile`，重启后保留 `cf_clearance` 等 Cookie。不需要浏览器抓取时，可在 `.env` 设置 `TRENDS_FETCH_MODE=http`，并按需精简 Dockerfile 中的 Chromium 安装层。
 
 镜像中同时包含同步 CLI，例如：
 
@@ -533,26 +529,26 @@ CALENDAR_SYNC_HOUR_UTC=20
 
 Node 调度按 UTC 整点每天执行，重启后等待下一个计划时间；如需立即导入，调用接口或 CLI。任务完成后才安排下一次，不在同一调度器中重叠执行。服务停止时取消计时器；实例停机期间不会补跑。两个运行环境的定时任务均记录 `calendar_sync_complete` / `calendar_sync_partial` / `calendar_sync_failed`，不输出认证凭证。Worker 任务失败会向平台报告失败。
 
-## 热度榜 trends 同步
+## 近期热门动画 trends 同步
 
-每天抓取 [Bangumi 动画热度榜第 1 页](https://bgm.tv/anime/browser/?sort=trends&page=1)，只从 `browserItemList` 中提取动画 ID，保持页面热度顺序去重，再逐条请求 `/v0/subjects/:id`。评分、人数、排名、别名、首播日期和作品形式均取自详情 API，不从页面文本猜测。仅接受动画详情，ID 必须与请求一致。
+调用 [Bangumi 搜索 API](https://bangumi.github.io/api/#/subject/searchSubjects)，使用 `POST /v0/search/subjects`、空关键词、`sort=heat` 和 `filter.type=[2]`，筛选最近半年开播的动画。`heat` 按收藏人数排序；按返回顺序去重，再逐条请求 `/v0/subjects/:id` 获取完整名称、别名、评分、人数、排名、首播日期和作品形式。仅接受动画详情，ID 必须与请求一致。
 
-页面默认由真实浏览器打开，等待 Cloudflare 的浏览器验证完成后再解析。`TRENDS_FETCH_MODE` 决定抓取方式：
+“最近半年”以同步开始时的 **UTC 日期** 为准，向前推 **6 个日历月**，包含起始日和当天，排除未来开播的动画；目标月份没有对应日期时取该月最后一天。例如 UTC 2026-11-11 同步时，搜索正文为：
 
-| 值                | 行为                                                                                                      |
-| ----------------- | --------------------------------------------------------------------------------------------------------- |
-| `browser`（默认） | Node 用 Puppeteer 启动本机 Chrome/Chromium；Worker 通过 Browser Rendering 绑定 `BROWSER` 启动远端浏览器。 |
-| `http`            | 直接 `fetch` 页面，不执行 JavaScript；页面返回 403 或验证页时无法同步，仅适合已验证可直连的部署。         |
+```json
+{
+  "keyword": "",
+  "sort": "heat",
+  "filter": {
+    "type": [2],
+    "air_date": [">=2026-05-11", "<2026-11-12"]
+  }
+}
+```
 
-`browser` 失败不会自动回退 `http`；需要直连时显式切换，避免验证失败后静默降级。
+`TRENDS_SYNC_LIMIT` 默认 24，允许 1～100，控制本轮最多读取的搜索结果数。上游单页最多 20 条，自动使用 `limit` / `offset` 分页；例如默认先请求 `?limit=20&offset=0`，再请求 `?limit=4&offset=20`。所有分页使用同一日期范围，按原始结果数推进，重复 ID 去重且不额外扩大读取预算；结果不足或重复时实际更新数量可能较少。先完成全部搜索分页，再获取详情和写库；任一分页失败整轮搜索失败。
 
-Node 模式要求本机有 Chrome/Chromium。`bun install` 通常会下载 Puppeteer 配套的 Chrome；下载被网络阻断时，可执行 `bun run browser:install`（等同 `bunx puppeteer browsers install chrome`），或用 `PUPPETEER_EXECUTABLE_PATH` 指向已有浏览器。`PUPPETEER_HEADLESS=false` 可在有显示环境时改用有头浏览器，便于人工完成交互式验证；设置 `PUPPETEER_USER_DATA_DIR` 可复用浏览器配置和 `cf_clearance` Cookie。Docker 镜像已内置 Chromium 并设置好这些变量。
-
-Worker 模式使用 `wrangler.jsonc` 的 `browser.binding = "BROWSER"`，需要账号支持 Browser Rendering，并受平台额度和限流约束。Browser Rendering 依赖远端资源，本地 `wrangler dev` 调试热度同步时可使用 `--remote`（或部署后验证）；本地连接不到远端浏览器时，可设置 `TRENDS_FETCH_MODE=http`。渲染器在缺少绑定时只让热度同步返回 `BANGUMI_TRENDS_ERROR`，其他接口不受影响。
-
-`TRENDS_BROWSER_TIMEOUT_MS` 默认 45000 毫秒（允许 5000～120000），用于等待验证页自行刷新并出现 `browserItemList`。验证页持续存在、需要人工交互、浏览器启动失败或页面超过 2 MiB 时，本轮同步失败且不写库。实现不接入打码服务或人工代验，只启动真实浏览器、使用普通 Chrome 标识并等待站点验证完成；需要交互式验证的部署会以超时失败。
-
-`TRENDS_SYNC_LIMIT` 默认 24，允许 1～100，实际数量不超过首页条目数；例如设为 10 时只更新首页热度最高的 10 条，不翻页，也不轮转剩余条目。定时开关默认与 calendar 独立：
+定时开关默认与 calendar 独立：
 
 | 环境          | 启用方式                                                                 | 默认时间                                        |
 | ------------- | ------------------------------------------------------------------------ | ----------------------------------------------- |
@@ -571,9 +567,9 @@ $headers = @{ Authorization = "Bearer $env:ADMIN_TOKEN" }
 Invoke-RestMethod -Method Post -Uri "$apiUrl/api/v1/admin/trends/sync" -Headers $headers
 ```
 
-成功返回 `discovered`（首页去重数量）、`attempted`（本次选取数量）、`imported`（成功参与合并数量）、`failedIds`、`dataAsOf` 和 `status`。`complete` 表示本次选取的条目都成功；部分详情失败时为 `partial`，HTTP 仍为 200，已成功的条目正常入库。重复调用会重新抓取当前首页和详情，不是从失败 ID 断点续跑。
+成功返回 `discovered`（本轮搜索去重数量，不是上游匹配总数）、`attempted`（本次选取数量）、`imported`（成功参与合并数量）、`failedIds`、`dataAsOf` 和 `status`。`complete` 表示本次选取的条目都成功，或搜索无结果；部分详情失败时为 `partial`，HTTP 仍为 200，已成功的条目正常入库。重复调用会重新搜索当前日期范围并获取详情，不是从失败 ID 断点续跑。
 
-所有成功详情集中写入一个事务，复用现有别名并发协调机制：按版本更新完整元数据、官方别名和评分，保留手动别名、首次入库时间与固定标记，补全季数别名并清理对应未命中记录。整批数据库写入失败时回滚本轮写入。不会删除已退出热度榜的条目，也不增加用户访问统计。SQLite、D1、PostgreSQL 使用相同的合并规则，无新增数据库迁移。
+所有成功详情集中写入一个事务，复用现有别名并发协调机制：按版本更新完整元数据、官方别名和评分，保留手动别名、首次入库时间与固定标记，补全季数别名并清理对应未命中记录。整批数据库写入失败时回滚本轮写入。不会删除不再符合搜索条件或热度降低的条目，也不增加用户访问统计。SQLite、D1、PostgreSQL 使用相同的合并规则，无新增数据库迁移。
 
 每轮成功或部分成功时，在同一事务保存 `sync_state` 的 `trends:last_sync`，内容与接口响应一致。查询最近一次结果：
 
@@ -582,11 +578,13 @@ $state = Invoke-RestMethod -Uri "$apiUrl/api/v1/admin/sync-state/trends%3Alast_s
 $state.value | ConvertFrom-Json
 ```
 
-浏览器启动失败、等待 Cloudflare 验证超时、返回验证页、空列表或结构改变时，返回 `503 BANGUMI_TRENDS_ERROR`；所有详情失败时返回 `503 BANGUMI_API_ERROR`。这些失败不会覆盖上次结果，因此排查时还应查看日志时间。定时日志包含 `trends_sync_complete` / `trends_sync_partial` / `trends_sync_failed`，单条详情失败额外记录 `trends_subject_failed`、条目 ID 和关联请求 ID；Worker 整轮失败向平台报告异常。
+搜索请求失败或响应校验失败时，返回 `503 BANGUMI_TRENDS_ERROR`；所有详情失败时返回 `503 BANGUMI_API_ERROR`。这些失败不会覆盖上次结果，因此排查时还应查看日志时间。定时日志包含 `trends_sync_complete` / `trends_sync_partial` / `trends_sync_failed`，单条详情失败额外记录 `trends_subject_failed`、条目 ID 和关联请求 ID；Worker 整轮失败向平台报告异常。
 
-浏览器模式下页面请求不携带 Bangumi API Token 或登录 Cookie；详情 API 在配置后使用 `BANGUMI_ACCESS_TOKEN` 的 Bearer 认证。**API Token 无法解决网站的 Cloudflare 验证**。浏览器模式由浏览器自己发出页面请求，User-Agent 是浏览器自身的 Chrome 标识，不使用 `BANGUMI_USER_AGENT`；后者仍用于详情 API。`http` 模式直接请求页面时使用 `BANGUMI_USER_AGENT`，但仍可能收到 403。持久化的浏览器用户目录可能保存 Cloudflare 的 `cf_clearance` Cookie，应只挂载给本服务，不要共享给不可信进程。
+搜索无结果属于成功：`discovered`、`attempted`、`imported` 均为 0，`failedIds=[]`、`status=complete`。此时只保存本轮摘要，不删除已有条目。
 
-普通一轮上游请求包含 1 次页面导航和 `attempted` 次详情请求（默认最多 25 次页面/API 请求），浏览器还会加载页面静态资源；详情串行获取，数据库采用 JSON 参数批量合并，避免逐条导入造成大量 D1 请求。上游 429/5xx 最多尝试 3 次，遵守 `Retry-After`，超过 60 秒的等待交由下轮任务；重试仍消耗请求额度。可降低 `TRENDS_SYNC_LIMIT` 控制免费 Worker 的请求、CPU 和数据库预算。
+搜索和详情请求均使用 `BANGUMI_USER_AGENT`；配置 `BANGUMI_ACCESS_TOKEN` 后均发送 `Authorization: Bearer <Token>`。Worker 继续使用同名 Secret。
+
+一轮上游请求由搜索分页和 `attempted` 次详情请求组成；默认 24 条在结果充足时是 2 次搜索加 24 次详情，共 26 次 API 请求。详情串行获取，数据库采用 JSON 参数批量合并，避免逐条导入造成大量 D1 请求。上游 429/5xx 最多尝试 3 次，遵守 `Retry-After`，超过 60 秒的等待交由下轮任务；重试仍消耗请求额度。可降低 `TRENDS_SYNC_LIMIT` 控制免费 Worker 的请求、CPU 和数据库预算，配置上限不代表运行平台一定有足够额度。
 
 ## 访问统计与冷数据
 
@@ -798,14 +796,9 @@ bun run cli import --file backup.jsonl --api-url https://your-worker.example.com
 | `CALENDAR_SYNC_ENABLED`        | Node 默认 `false`，Worker 配置为 `true` | 是否启用日历定时任务，仅接受 `true` / `false`，不影响手动导入                 |
 | `CALENDAR_SYNC_HOUR_UTC`       | `20`                                    | 每日日历任务 UTC 小时，0～23；Worker 需同步修改 `triggers.crons`              |
 | `CALENDAR_PLATFORM_BATCH_SIZE` | `10`                                    | 单次日历同步最多补全的空作品形式数量，允许任意正整数                          |
-| `TRENDS_SYNC_ENABLED`          | Node 默认 `false`，Worker 配置为 `true` | 是否启用热度榜定时任务，独立于 calendar，不影响手动同步                       |
+| `TRENDS_SYNC_ENABLED`          | Node 默认 `false`，Worker 配置为 `true` | 是否启用近期热门动画定时任务，独立于 calendar，不影响手动同步                 |
 | `TRENDS_SYNC_HOUR_UTC`         | `21`                                    | 每日热度任务 UTC 小时，0～23；Worker 需同步修改 `triggers.crons`              |
-| `TRENDS_SYNC_LIMIT`            | `24`                                    | 按热度选取首页前多少条，1～100；不翻页，实际数量不超过首页条目数              |
-| `TRENDS_FETCH_MODE`            | `browser`                               | `browser` 用真实浏览器完成 Cloudflare 验证；`http` 直接请求页面，可能 403     |
-| `TRENDS_BROWSER_TIMEOUT_MS`    | `45000`                                 | 浏览器等待验证和列表出现的上限，5000～120000 毫秒                             |
-| `PUPPETEER_EXECUTABLE_PATH`    | 空                                      | 仅 Node：Chrome/Chromium 路径；留空时使用 Puppeteer 自带浏览器                |
-| `PUPPETEER_USER_DATA_DIR`      | 空；Docker 为数据卷目录                 | 仅 Node：浏览器用户目录，可复用 `cf_clearance`；确保目录可写                  |
-| `PUPPETEER_HEADLESS`           | 空（无头）                              | 仅 Node：设为 `false` 使用有头浏览器，需可用的显示环境                        |
+| `TRENDS_SYNC_LIMIT`            | `24`                                    | 最多读取多少条搜索结果，1～100；每页最多 20 条，按收藏人数排序                |
 
 ## 服务端异常日志
 

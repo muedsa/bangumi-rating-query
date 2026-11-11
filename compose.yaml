@@ -20,11 +20,6 @@ services:
       TRENDS_SYNC_ENABLED: ${TRENDS_SYNC_ENABLED:-false}
       TRENDS_SYNC_HOUR_UTC: ${TRENDS_SYNC_HOUR_UTC:-21}
       TRENDS_SYNC_LIMIT: ${TRENDS_SYNC_LIMIT:-24}
-      TRENDS_FETCH_MODE: ${TRENDS_FETCH_MODE:-browser}
-      TRENDS_BROWSER_TIMEOUT_MS: ${TRENDS_BROWSER_TIMEOUT_MS:-45000}
-      # 镜像内固定使用 Debian Chromium，不能被宿主机 .env 的本地浏览器路径覆盖。
-      PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium
-      PUPPETEER_USER_DATA_DIR: /app/data/browser-profile
     volumes:
       - bangumi-data:/app/data
     restart: unless-stopped

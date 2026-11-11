@@ -21,12 +21,12 @@ export class TrendsSyncService {
       );
     let snapshot;
     try {
-      snapshot = trendsSnapshotSchema.parse(await this.source.getTrends());
+      snapshot = trendsSnapshotSchema.parse(await this.source.getTrends(this.limit));
     } catch (error) {
       throw new AppError(
         503,
         'BANGUMI_TRENDS_ERROR',
-        'Bangumi 热度页面获取、验证或解析失败，请稍后重试',
+        'Bangumi 近期热门动画搜索或校验失败，请稍后重试',
         { cause: error },
       );
     }
@@ -46,7 +46,7 @@ export class TrendsSyncService {
         onSubjectError?.(id, error);
       }
     }
-    if (!records.length)
+    if (selected.length && !records.length)
       throw new AppError(503, 'BANGUMI_API_ERROR', 'Bangumi 热度条目详情均获取失败，请稍后重试', {
         cause: lastError,
       });

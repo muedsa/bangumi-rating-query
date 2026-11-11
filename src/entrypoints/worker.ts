@@ -1,11 +1,9 @@
 import type { D1Database } from '@cloudflare/workers-types';
-import type { BrowserWorker } from '@cloudflare/puppeteer';
 import { D1Driver } from '../adapters/storage/d1.ts';
 import { SqlRepository } from '../adapters/storage/repository.ts';
-import { readConfig, type Config } from '../config.ts';
+import { readConfig } from '../config.ts';
 import { createApp } from '../http/app.ts';
 import { createBangumiSource } from '../adapters/bangumi/client.ts';
-import { createWorkerPageRenderer } from '../adapters/bangumi/browser-worker.ts';
 import { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import { runCalendarJob } from '../scheduling/calendar.ts';
 import { TrendsSyncService } from '../core/trends-sync-service.ts';
@@ -14,8 +12,6 @@ import { createServerErrorLogger, requestErrorContext } from '../observability/e
 
 interface Env {
   DB: D1Database;
-  /** Cloudflare Browser Rendering 绑定，wrangler.jsonc 中配置为 BROWSER。 */
-  BROWSER?: BrowserWorker;
   STATS_ENABLED?: string;
   ALIAS_MISS_STATS_ENABLED?: string;
   ADMIN_TOKEN?: string;
@@ -30,19 +26,6 @@ interface Env {
   TRENDS_SYNC_ENABLED?: string;
   TRENDS_SYNC_HOUR_UTC?: string;
   TRENDS_SYNC_LIMIT?: string;
-  TRENDS_FETCH_MODE?: string;
-  TRENDS_BROWSER_TIMEOUT_MS?: string;
-}
-
-function createSource(config: Config, env: Env) {
-  return createBangumiSource(config, {
-    trendsRenderer:
-      config.TRENDS_FETCH_MODE === 'browser'
-        ? createWorkerPageRenderer(env.BROWSER, {
-            timeoutMs: config.TRENDS_BROWSER_TIMEOUT_MS,
-          })
-        : undefined,
-  });
 }
 
 let cachedEnv: Env | undefined;
@@ -52,7 +35,7 @@ export default {
     try {
       if (env !== cachedEnv || !cachedApp) {
         const config = readConfig({ ...env });
-        const source = createSource(config, env);
+        const source = createBangumiSource(config);
         cachedApp = createApp(new SqlRepository(new D1Driver(env.DB)), config, {
           subjectSource: source,
           calendarSource: source,
@@ -83,7 +66,7 @@ export default {
     try {
       const config = readConfig({ ...env });
       const repo = new SqlRepository(new D1Driver(env.DB));
-      const source = createSource(config, env);
+      const source = createBangumiSource(config);
       if (
         config.CALENDAR_SYNC_ENABLED &&
         controller.cron === `0 ${config.CALENDAR_SYNC_HOUR_UTC} * * *`

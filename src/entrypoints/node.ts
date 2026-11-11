@@ -6,7 +6,6 @@ import { SqlRepository } from '../adapters/storage/repository.ts';
 import { readConfig } from '../config.ts';
 import { createApp } from '../http/app.ts';
 import { createBangumiSource } from '../adapters/bangumi/client.ts';
-import { createNodePageRenderer } from '../adapters/bangumi/browser-node.ts';
 import { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import { startCalendarSchedule } from '../scheduling/calendar.ts';
 import { TrendsSyncService } from '../core/trends-sync-service.ts';
@@ -25,11 +24,7 @@ const driver = await openStorage(process.env).catch((error) => {
   process.exit(1);
 });
 const repo = new SqlRepository(driver);
-const trendsRenderer =
-  config.TRENDS_FETCH_MODE === 'browser'
-    ? createNodePageRenderer({ timeoutMs: config.TRENDS_BROWSER_TIMEOUT_MS })
-    : undefined;
-const source = createBangumiSource(config, { trendsRenderer });
+const source = createBangumiSource(config);
 const app = createApp(repo, config, {
   subjectSource: source,
   calendarSource: source,

@@ -27,12 +27,7 @@ export interface CalendarSource {
 }
 
 export interface TrendsSource extends SubjectSource {
-  getTrends(): Promise<TrendsSnapshot>;
-}
-
-/** 用真实浏览器打开页面并返回渲染后的 HTML，用于通过 Cloudflare 浏览器验证。 */
-export interface PageRenderer {
-  render(url: string): Promise<string>;
+  getTrends(limit: number): Promise<TrendsSnapshot>;
 }
 
 export interface AnimeRepository {

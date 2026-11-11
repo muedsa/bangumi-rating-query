@@ -726,8 +726,6 @@ async function runtime(
               TRENDS_SYNC_ENABLED: String(bangumi.trendsSyncEnabled ?? false),
               TRENDS_SYNC_HOUR_UTC: String(bangumi.trendsSyncHourUtc ?? 21),
               TRENDS_SYNC_LIMIT: String(bangumi.trendsSyncLimit ?? 24),
-              // 集成测试通过 outboundService 模拟页面，不启动 Browser Rendering。
-              TRENDS_FETCH_MODE: 'http',
             }
           : {}),
       },
@@ -3033,12 +3031,18 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
         fetcher: (async (input, init) => {
           const url = new URL(String(input));
           requests.push({ url: url.href, headers: new Headers(init?.headers) });
-          if (url.hostname === 'bgm.tv') {
-            if (mode === 'challenge')
-              return new Response('<title>Just a moment...</title>', {
-                headers: { 'Content-Type': 'text/html' },
-              });
-            return trendsResponse();
+          if (url.pathname === '/v0/search/subjects') {
+            assert.equal(init?.method, 'POST');
+            assert.equal(url.searchParams.get('limit'), '4');
+            assert.equal(url.searchParams.get('offset'), '0');
+            const body = JSON.parse(String(init?.body));
+            assert.equal(body.keyword, '');
+            assert.equal(body.sort, 'heat');
+            assert.deepEqual(body.filter.type, [2]);
+            assert.match(body.filter.air_date[0], /^>=\d{4}-\d{2}-\d{2}$/u);
+            assert.match(body.filter.air_date[1], /^<\d{4}-\d{2}-\d{2}$/u);
+            if (mode === 'invalid-search') return Response.json({ total: 1 });
+            return trendsResponse(mode === 'empty' ? [] : undefined);
           }
           const id = Number(url.pathname.split('/').at(-1));
           if (mode === 'all-failed' || (mode === 'partial' && id === 202))
@@ -3126,13 +3130,10 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
     assert.equal((await target.sql('SELECT * FROM alias_miss_stats')).length, 0);
     assert.equal((await target.sql('SELECT * FROM subject_usage')).length, 0);
     assert.equal(requests.length, 5);
-    assert.equal(requests[0]!.headers.has('Authorization'), false);
-    assert(
-      requests.slice(1).every((r) => r.headers.get('Authorization') === 'Bearer trends-secret'),
-    );
+    assert(requests.every((r) => r.headers.get('Authorization') === 'Bearer trends-secret'));
     assert.deepEqual(JSON.parse(String((await state())[0]!.value)), result);
     const saved = await state();
-    for (const failure of ['challenge', 'all-failed']) {
+    for (const failure of ['invalid-search', 'all-failed']) {
       mode = failure;
       const response = await sync();
       assert.equal(response.status, 503);
@@ -3145,6 +3146,26 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       );
       assert.deepEqual(await state(), saved);
     }
+    mode = 'empty';
+    const subjectsBeforeEmpty = await target.sql('SELECT * FROM subjects ORDER BY id');
+    const empty = await sync();
+    assert.equal(empty.status, 200);
+    const emptyResult = (await empty.json()) as any;
+    assertResponse(openApiDocument, '/api/v1/admin/trends/sync', 'POST', 200, emptyResult);
+    assert.deepEqual(
+      { ...emptyResult, dataAsOf: '' },
+      {
+        discovered: 0,
+        attempted: 0,
+        imported: 0,
+        failedIds: [],
+        dataAsOf: '',
+        status: 'complete',
+      },
+    );
+    assert.deepEqual(await target.sql('SELECT * FROM subjects ORDER BY id'), subjectsBeforeEmpty);
+    assert.deepEqual(JSON.parse(String((await state())[0]!.value)), emptyResult);
+    const emptyState = await state();
     mode = 'complete';
     await target.sql(
       kind === 'postgres'
@@ -3154,7 +3175,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
     const before = await target.sql('SELECT * FROM subjects ORDER BY id');
     assert.equal((await sync()).status, 503);
     assert.deepEqual(await target.sql('SELECT * FROM subjects ORDER BY id'), before);
-    assert.deepEqual(await state(), saved);
+    assert.deepEqual(await state(), emptyState);
     await target.sql(
       kind === 'postgres' ? 'DROP TRIGGER reject_trends ON subjects' : 'DROP TRIGGER reject_trends',
     );
@@ -3193,14 +3214,14 @@ test('Worker trends 和 calendar 按独立 Cron、开关分发，同一时间失
         const url = new URL(String(input));
         calls.push(url.pathname);
         if (url.pathname === '/calendar') return new Response('', { status: 401 });
-        if (url.hostname === 'bgm.tv') return trendsResponse([1]);
+        if (url.pathname === '/v0/search/subjects') return trendsResponse([1]);
         return Response.json({ id: 1, type: 2, name: '热度动画', rating: { score: 0, total: 0 } });
       }) as typeof fetch,
     });
   const enabled = await make(true);
   t.after(() => enabled.close());
   assert.equal((await enabled.scheduled!('0 21 * * *')).outcome, 'ok');
-  assert.deepEqual(calls, ['/anime/browser/', '/v0/subjects/1']);
+  assert.deepEqual(calls, ['/v0/search/subjects', '/v0/subjects/1']);
   calls.length = 0;
   assert.equal((await enabled.scheduled!('0 20 * * *')).outcome, 'exception');
   assert.deepEqual(calls, ['/calendar']);
@@ -3214,7 +3235,7 @@ test('Worker trends 和 calendar 按独立 Cron、开关分发，同一时间失
   const sameHour = await make(true, 20);
   t.after(() => sameHour.close());
   assert.equal((await sameHour.scheduled!()).outcome, 'exception');
-  assert.deepEqual(calls, ['/calendar', '/anime/browser/', '/v0/subjects/1']);
+  assert.deepEqual(calls, ['/calendar', '/v0/search/subjects', '/v0/subjects/1']);
   assert.equal((await sameHour.sql('SELECT id FROM subjects'))[0]!.id, 1);
 });
 
