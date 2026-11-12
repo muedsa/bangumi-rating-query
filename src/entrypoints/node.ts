@@ -8,8 +8,6 @@ import { createApp } from '../http/app.ts';
 import { createBangumiSource } from '../adapters/bangumi/client.ts';
 import { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import { startCalendarSchedule } from '../scheduling/calendar.ts';
-import { TrendsSyncService } from '../core/trends-sync-service.ts';
-import { startTrendsSchedule } from '../scheduling/trends.ts';
 import { createServerErrorLogger } from '../observability/errors.ts';
 
 if (existsSync('.env')) loadEnvFile('.env');
@@ -38,13 +36,6 @@ const stopCalendar = config.CALENDAR_SYNC_ENABLED
       logError,
     )
   : () => {};
-const stopTrends = config.TRENDS_SYNC_ENABLED
-  ? startTrendsSchedule(
-      new TrendsSyncService(repo, source, config.TRENDS_SYNC_LIMIT),
-      config.TRENDS_SYNC_HOUR_UTC,
-      logError,
-    )
-  : () => {};
 const server = serve(
   { fetch: app.fetch, port, hostname: process.env.HOST ?? '0.0.0.0' },
   (info) => {
@@ -59,7 +50,6 @@ const server = serve(
 );
 function shutdown() {
   stopCalendar();
-  stopTrends();
   server.close(() => {
     Promise.resolve(driver.close()).then(
       () => process.exit(0),

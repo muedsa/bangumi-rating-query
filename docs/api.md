@@ -466,48 +466,64 @@ Worker 初始化失败返回 `503 CONFIGURATION_ERROR` 并带 `X-Request-ID`，�
 
 ### POST /api/v1/admin/trends/sync
 
-需要 `Authorization: Bearer <ADMIN_TOKEN>`。无参数、无正文，不受 `TRENDS_SYNC_ENABLED` 定时开关影响；仍需配置 `BANGUMI_USER_AGENT`。
+需要 `Authorization: Bearer <ADMIN_TOKEN>` 和服务端 `BANGUMI_USER_AGENT`。由外部定时 HTTP 请求驱动，已移除 trends 内置定时任务，calendar 的定时任务不受影响。
 
-通过 `POST /v0/search/subjects` 搜索，正文固定空 `keyword`、`sort=heat`（收藏人数排序）、`filter.type=[2]`，`filter.air_date` 限定最近六个日历月。日期按同步开始时的 UTC 当天计算，包含起止日，月底截短到目标月份最后一天，排除未来开播的动画。例如 2026-11-11 使用 `[">=2026-05-11", "<2026-11-12"]`。
+| 参数   | 位置  | 类型    | 默认 | 说明                                                              |
+| ------ | ----- | ------- | ---- | ----------------------------------------------------------------- |
+| `page` | query | integer | `1`  | 从 1 开始的页码，最大 450359962737050，确保上游 offset 是安全整数 |
 
-本轮最多读取 `TRENDS_SYNC_LIMIT` 条搜索结果（默认 24，允许 1～100），上游每页最多 20 条，自动用 `limit` / `offset` 分页；同轮日期条件固定，按原始结果数推进。默认请求 20 条后再取 4 条，重复 ID 去重且不额外补齐，结果不足时实际数量较少。完成全部搜索分页后，按返回顺序从 `/v0/subjects/:id` 获取完整动画详情；任一搜索分页失败都不写入本轮数据。
+```http
+POST /api/v1/admin/trends/sync?page=2
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+无需正文。固定使用 `POST /v0/search/subjects?limit=20&offset=(page-1)*20`，每次只查询这一页，不自动翻页。正文为 `keyword=""`、`sort=heat`（收藏人数排序）、`filter.type=[2]`；`filter.air_date` 按本次 UTC 当天向前推六个日历月，包含起止日，月底截短至目标月末并排除未来日期。例如 2026-11-12 使用 `[">=2026-05-12", "<2026-11-13"]`。按本页顺序去重后，从 `/v0/subjects/:id` 获取最多 20 条完整详情。
 
 ```json
 {
-  "discovered": 10,
-  "attempted": 10,
-  "imported": 9,
+  "page": 2,
+  "pageSize": 20,
+  "total": 41,
+  "nextPage": 3,
+  "discovered": 20,
+  "attempted": 20,
+  "imported": 19,
   "failedIds": [101],
-  "dataAsOf": "2026-01-01T00:00:00.000Z",
+  "dataAsOf": "2026-11-12T00:00:00.000Z",
   "status": "partial"
 }
 ```
 
-| 字段         | 含义                                                                          |
-| ------------ | ----------------------------------------------------------------------------- |
-| `discovered` | 本轮搜索返回并去重后的动画数量，不是上游匹配总数                              |
-| `attempted`  | 本次选取并请求详情的条目数量，最多 `TRENDS_SYNC_LIMIT`                        |
-| `imported`   | 成功获取详情并参与合并的数量，不等于新增数量                                  |
-| `failedIds`  | 详情获取或校验失败的条目 ID；成功时为空数组                                   |
-| `dataAsOf`   | 搜索开始时间，ISO 8601；各条目评分时间取自各自详情请求                        |
-| `status`     | `complete`：选中条目全部成功或搜索无结果；`partial`：部分详情失败，仍返回 200 |
+| 字段         | 含义                                                                      |
+| ------------ | ------------------------------------------------------------------------- |
+| `page`       | 本次处理的页码，从 1 开始                                                 |
+| `pageSize`   | 固定为 20；不是实际获取数量                                               |
+| `total`      | 上游匹配总数，未去重                                                      |
+| `nextPage`   | 下一页页码；本页为空或 `page * 20 >= total` 时为 null，不自动发起后续请求 |
+| `discovered` | 本页返回并去重后的动画数量，最多 20                                       |
+| `attempted`  | 本页尝试获取详情的条目数                                                  |
+| `imported`   | 成功获取详情并参与合并的数量，不等于新增数量                              |
+| `failedIds`  | 详情获取或校验失败的条目 ID                                               |
+| `dataAsOf`   | 本次搜索开始时间，ISO 8601；评分时间取自详情请求                          |
+| `status`     | `complete`：本页全部成功或为空；`partial`：本页部分详情失败，仍返回 200   |
 
-`attempted = imported + failedIds.length`。`complete` 不表示因数量限制未选取的条目也更新了。只要有成功详情，就把这些条目和 `trends:last_sync` 在同一事务中写入。按版本更新元数据、官方别名和完整评分（包括排名），保留手动别名、`cachedAt` 与 `pinned`，补全季数名称并清理未命中记录。不会删除不再热门的条目，不写访问统计。
+`attempted = imported + failedIds.length`。`complete` 只表示本页处理完成；外部调度器根据 `nextPage` 安排后续 HTTP 请求，另外检查 `failedIds`，重试本页或通过单条同步接口补齐失败条目。每次调用独立计算日期范围、获取热度排序，跨页不保证一致性快照。
 
-再次调用会重新搜索当前日期范围，未提供失败重试专用游标；重复导入安全，但会产生新的上游请求和数据库操作。可用 `GET /api/v1/admin/sync-state/trends%3Alast_sync` 查询最近成功或部分成功的摘要，`value` 是包含上述结构的 JSON 字符串。失败不覆盖该摘要；请结合日志时间判断。
+本页成功详情与 `trends:last_sync` 在同一事务写入。按版本更新元数据、官方别名和评分，保留手动别名、`cachedAt` 与 `pinned`，补全季数名称并清理未命中记录。不删除不再热门的条目，不写访问统计。空页返回 200、三个计数为 0、`nextPage=null`、`status=complete`，只保存本页摘要。
 
-| 状态 / 错误代码                           | 含义和处理方式                                                                 |
-| ----------------------------------------- | ------------------------------------------------------------------------------ |
-| `401 UNAUTHORIZED` / `503 ADMIN_DISABLED` | 管理 Token 无效或服务端未启用管理接口                                          |
-| `503 BANGUMI_SYNC_DISABLED`               | 服务端未配置上游同步标识                                                       |
-| `503 BANGUMI_TRENDS_ERROR`                | 搜索分页 HTTP/网络错误、非 JSON、字段缺失、ID 无效或非动画结果；不写入本轮数据 |
-| `503 BANGUMI_API_ERROR`                   | 本轮选中条目的详情全部获取或校验失败；不写入本轮数据                           |
-| `400 ALIAS_LIMIT` / `ALIAS_TOO_LONG`      | 详情合并时触发本地别名限制，整批不提交                                         |
-| `503 SERVICE_UNAVAILABLE`                 | 数据库或内部故障；本轮事务回滚，按 `X-Request-ID` 排查                         |
+重复调用同页会重新查询和导入，没有断点游标。`GET /api/v1/admin/sync-state/trends%3Alast_sync` 返回最近成功或部分成功的一页摘要，`value` 是含上述字段的 JSON 字符串；不会累计整轮所有页面，外部调度器应自行记录各页响应及 `X-Request-ID`。失败不覆盖该摘要。
 
-搜索无结果返回 HTTP 200：`discovered=attempted=imported=0`、`failedIds=[]`、`status=complete`，只保存本轮摘要，已有条目保持不变。
+| 状态 / 错误代码                           | 含义和处理方式                                               |
+| ----------------------------------------- | ------------------------------------------------------------ |
+| `400 INVALID_INPUT`                       | 页码不是有效正整数或换算 offset 超出安全整数范围；不访问上游 |
+| `401 UNAUTHORIZED` / `503 ADMIN_DISABLED` | 管理 Token 无效或服务端未启用管理接口                        |
+| `503 BANGUMI_SYNC_DISABLED`               | 未配置上游同步标识                                           |
+| `503 BANGUMI_TRENDS_ERROR`                | 本页搜索 HTTP/网络或响应校验失败；不写入本页数据             |
+| `503 BANGUMI_API_ERROR`                   | 本页所有详情均获取或校验失败；不写入本页数据                 |
+| `400 ALIAS_LIMIT` / `ALIAS_TOO_LONG`      | 合并触发别名限制，整页不提交                                 |
+| `503 SERVICE_UNAVAILABLE`                 | 数据库或内部故障，本页事务回滚，按请求 ID 排查               |
 
-搜索与详情 API 均使用 `BANGUMI_USER_AGENT`，配置 `BANGUMI_ACCESS_TOKEN` 后均使用 Bearer Token。默认结果充足时是 2 次搜索 + 24 次详情请求，重试另计。单条失败记录 `trends_subject_failed`（含 `subjectId`），定时整体结果记录 `trends_sync_complete` / `trends_sync_partial` / `trends_sync_failed`。运行时开关、调度时间和额度说明见 [README](../README.md#近期热门动画-trends-同步)。
+搜索与详情均使用 `BANGUMI_USER_AGENT`，配置 `BANGUMI_ACCESS_TOKEN` 后均使用 Bearer Token。正常每次最多 1 次搜索加 20 次详情请求；HTTP 仍受平台子请求额度限制，重试和数据库操作另计。单条失败日志为 `trends_subject_failed`（含 `page`、`subjectId`），整次失败为 `request_failed`。外部调度示例见 [README](../README.md#近期热门动画-trends-同步)。
 
 ## 导入导出与恢复
 
@@ -887,18 +903,18 @@ OpenAPI 将输入与输出分开：例如 `ImportRequest` 中可省略有默认�
 
 当前服务没有通用幂等键或事务查询接口。不要对全部失败无限重试；配置、鉴权、校验错误应先修正。临时网络故障或 503 可采用有限次数的退避延迟；503 也可能是永久配置或上游数据问题。
 
-| 操作                 | 响应丢失或重试的影响                                                                             |
-| -------------------- | ------------------------------------------------------------------------------------------------ |
-| 评分查询             | 数据结果不被修改，但启用统计时重试会再次计数                                                     |
-| 同版本 import        | 版本保护允许安全重放；成功不等于此次实际更新                                                     |
-| 添加同名别名         | 复用已有记录；先核对来源与冲突结果                                                               |
-| 修改别名             | 可能已写入但后续冲突读取失败，先查询当前别名                                                     |
-| 删除别名             | 已删除后重复调用返回 404；先核对目标 ID                                                          |
-| 单条 sync / calendar | 会重新请求上游；日历已完成部分不会回滚，partial 可继续调用                                       |
-| trends               | 重新搜索近期热门动画并获取详情，成功数据按版本合并；每轮成功/部分成功摘要覆盖 `trends:last_sync` |
-| restore              | 已恢复后重复请求返回 409；必须核对备份内容再继续                                                 |
-| prune                | 可重复调用，持续删除满足条件的旧每日行                                                           |
-| 检查点 PUT           | 覆盖同名值；不要因延迟重试把更新的检查点倒退                                                     |
+| 操作                 | 响应丢失或重试的影响                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------ |
+| 评分查询             | 数据结果不被修改，但启用统计时重试会再次计数                                               |
+| 同版本 import        | 版本保护允许安全重放；成功不等于此次实际更新                                               |
+| 添加同名别名         | 复用已有记录；先核对来源与冲突结果                                                         |
+| 修改别名             | 可能已写入但后续冲突读取失败，先查询当前别名                                               |
+| 删除别名             | 已删除后重复调用返回 404；先核对目标 ID                                                    |
+| 单条 sync / calendar | 会重新请求上游；日历已完成部分不会回滚，partial 可继续调用                                 |
+| trends               | 重新搜索指定页并获取详情，成功数据按版本合并；每页成功/部分成功摘要覆盖 `trends:last_sync` |
+| restore              | 已恢复后重复请求返回 409；必须核对备份内容再继续                                           |
+| prune                | 可重复调用，持续删除满足条件的旧每日行                                                     |
+| 检查点 PUT           | 覆盖同名值；不要因延迟重试把更新的检查点倒退                                               |
 
 ## 常见工作流
 

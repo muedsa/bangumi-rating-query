@@ -649,9 +649,6 @@ async function runtime(
     fetcher: typeof fetch;
     calendarSyncEnabled?: boolean;
     calendarPlatformBatchSize?: number;
-    trendsSyncEnabled?: boolean;
-    trendsSyncHourUtc?: number;
-    trendsSyncLimit?: number;
   },
   aliasMissStatsEnabled = false,
 ) {
@@ -673,7 +670,6 @@ async function runtime(
         STATS_ENABLED: String(enabled),
         ALIAS_MISS_STATS_ENABLED: String(aliasMissStatsEnabled),
         CALENDAR_PLATFORM_BATCH_SIZE: bangumi?.calendarPlatformBatchSize ?? 10,
-        TRENDS_SYNC_LIMIT: bangumi?.trendsSyncLimit ?? 24,
         BANGUMI_USER_AGENT: bangumi?.userAgent ?? '',
         BANGUMI_ACCESS_TOKEN: bangumi?.accessToken ?? '',
       }),
@@ -723,9 +719,6 @@ async function runtime(
               BANGUMI_ACCESS_TOKEN: bangumi.accessToken,
               CALENDAR_SYNC_ENABLED: String(bangumi.calendarSyncEnabled ?? false),
               CALENDAR_PLATFORM_BATCH_SIZE: String(bangumi.calendarPlatformBatchSize ?? 10),
-              TRENDS_SYNC_ENABLED: String(bangumi.trendsSyncEnabled ?? false),
-              TRENDS_SYNC_HOUR_UTC: String(bangumi.trendsSyncHourUtc ?? 21),
-              TRENDS_SYNC_LIMIT: String(bangumi.trendsSyncLimit ?? 24),
             }
           : {}),
       },
@@ -3027,14 +3020,13 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
       {
         userAgent: 'test/trends',
         accessToken: 'trends-secret',
-        trendsSyncLimit: 4,
         fetcher: (async (input, init) => {
           const url = new URL(String(input));
           requests.push({ url: url.href, headers: new Headers(init?.headers) });
           if (url.pathname === '/v0/search/subjects') {
             assert.equal(init?.method, 'POST');
-            assert.equal(url.searchParams.get('limit'), '4');
-            assert.equal(url.searchParams.get('offset'), '0');
+            assert.equal(url.searchParams.get('limit'), '20');
+            assert.equal(url.searchParams.get('offset'), '20');
             const body = JSON.parse(String(init?.body));
             assert.equal(body.keyword, '');
             assert.equal(body.sort, 'heat');
@@ -3042,7 +3034,7 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
             assert.match(body.filter.air_date[0], /^>=\d{4}-\d{2}-\d{2}$/u);
             assert.match(body.filter.air_date[1], /^<\d{4}-\d{2}-\d{2}$/u);
             if (mode === 'invalid-search') return Response.json({ total: 1 });
-            return trendsResponse(mode === 'empty' ? [] : undefined);
+            return trendsResponse(mode === 'empty' ? [] : undefined, 24);
           }
           const id = Number(url.pathname.split('/').at(-1));
           if (mode === 'all-failed' || (mode === 'partial' && id === 202))
@@ -3063,9 +3055,21 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
     );
     t.after(() => target.close());
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-    const sync = () => target.fetch('/api/v1/admin/trends/sync', { method: 'POST', headers });
+    const sync = () =>
+      target.fetch('/api/v1/admin/trends/sync?page=2', { method: 'POST', headers });
     const state = () => target.sql("SELECT value FROM sync_state WHERE key='trends:last_sync'");
     assert.equal((await target.fetch('/api/v1/admin/trends/sync', { method: 'POST' })).status, 401);
+    for (const page of ['0', '-1', '1.5', '', 'invalid', 'Infinity', '450359962737051']) {
+      const response = await target.fetch(`/api/v1/admin/trends/sync?page=${page}`, {
+        method: 'POST',
+        headers,
+      });
+      assert.equal(response.status, 400);
+      const error = (await response.json()) as any;
+      assertResponse(openApiDocument, '/api/v1/admin/trends/sync', 'POST', 400, error);
+      assert.equal(error.error.code, 'INVALID_INPUT');
+      assert.deepEqual(error.error.issues[0].path, ['page']);
+    }
     assert.equal(requests.length, 0);
     const initial = fixture(100, '旧详情', ['旧上游名称']);
     initial.subject.pinned = true;
@@ -3094,6 +3098,10 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
     assert.deepEqual(
       { ...result, dataAsOf: '' },
       {
+        page: 2,
+        pageSize: 20,
+        total: 24,
+        nextPage: null,
         discovered: 4,
         attempted: 4,
         imported: 3,
@@ -3155,6 +3163,10 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
     assert.deepEqual(
       { ...emptyResult, dataAsOf: '' },
       {
+        page: 2,
+        pageSize: 20,
+        total: 24,
+        nextPage: null,
         discovered: 0,
         attempted: 0,
         imported: 0,
@@ -3201,42 +3213,73 @@ for (const kind of ['node', 'worker', 'postgres'] as const)
     );
   });
 
-test('Worker trends 和 calendar 按独立 Cron、开关分发，同一时间失败互不阻断', async (t) => {
-  const calls: string[] = [];
-  const make = (enabled: boolean, hour = 21) =>
-    runtime('worker', false, {
-      userAgent: 'tester/trends-cron',
+for (const kind of ['node', 'worker', 'postgres'] as const)
+  test(`${kind}: trends 默认第一页和指定页均限制为一次搜索加 20 次详情请求`, async (t) => {
+    const calls: string[] = [];
+    const target = await runtime(kind, false, {
+      userAgent: 'tester/trends-page',
       accessToken: '',
-      calendarSyncEnabled: true,
-      trendsSyncEnabled: enabled,
-      trendsSyncHourUtc: hour,
       fetcher: (async (input) => {
         const url = new URL(String(input));
-        calls.push(url.pathname);
-        if (url.pathname === '/calendar') return new Response('', { status: 401 });
-        if (url.pathname === '/v0/search/subjects') return trendsResponse([1]);
-        return Response.json({ id: 1, type: 2, name: '热度动画', rating: { score: 0, total: 0 } });
+        calls.push(url.pathname + url.search);
+        if (url.pathname === '/v0/search/subjects') {
+          assert.equal(url.searchParams.get('limit'), '20');
+          const offset = Number(url.searchParams.get('offset'));
+          return trendsResponse(
+            Array.from({ length: 20 }, (_, i) => offset + i + 1),
+            100,
+          );
+        }
+        const id = Number(url.pathname.split('/').at(-1));
+        return Response.json({
+          id,
+          type: 2,
+          name: `热门动画${id}`,
+          rating: { score: 8, total: 100 },
+        });
       }) as typeof fetch,
     });
-  const enabled = await make(true);
-  t.after(() => enabled.close());
-  assert.equal((await enabled.scheduled!('0 21 * * *')).outcome, 'ok');
-  assert.deepEqual(calls, ['/v0/search/subjects', '/v0/subjects/1']);
-  calls.length = 0;
-  assert.equal((await enabled.scheduled!('0 20 * * *')).outcome, 'exception');
+    t.after(() => target.close());
+    for (const [query, page] of [
+      ['', 1],
+      ['?page=3', 3],
+    ] as const) {
+      calls.length = 0;
+      const response = await target.fetch(`/api/v1/admin/trends/sync${query}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      assert.equal(response.status, 200);
+      const result = (await response.json()) as any;
+      assertResponse(openApiDocument, '/api/v1/admin/trends/sync', 'POST', 200, result);
+      assert.equal(result.page, page);
+      assert.equal(result.pageSize, 20);
+      assert.equal(result.imported, 20);
+      assert.equal(result.total, 100);
+      assert.equal(result.nextPage, page + 1);
+      assert.equal(calls.length, 21);
+      assert.equal(calls[0], `/v0/search/subjects?limit=20&offset=${(page - 1) * 20}`);
+    }
+  });
+
+test('Worker 仅保留 calendar 定时任务，旧 trends Cron 不再访问上游', async (t) => {
+  const calls: string[] = [];
+  const target = await runtime('worker', false, {
+    userAgent: 'tester/calendar-cron',
+    accessToken: '',
+    calendarSyncEnabled: true,
+    fetcher: (async (input) => {
+      const url = new URL(String(input));
+      calls.push(url.pathname);
+      assert.equal(url.pathname, '/calendar');
+      return Response.json([]);
+    }) as typeof fetch,
+  });
+  t.after(() => target.close());
+  assert.equal((await target.scheduled!('0 21 * * *')).outcome, 'ok');
+  assert.deepEqual(calls, []);
+  assert.equal((await target.scheduled!('0 20 * * *')).outcome, 'ok');
   assert.deepEqual(calls, ['/calendar']);
-  calls.length = 0;
-  await enabled.scheduled!('0 22 * * *');
-  assert.deepEqual(calls, []);
-  const disabled = await make(false);
-  t.after(() => disabled.close());
-  await disabled.scheduled!('0 21 * * *');
-  assert.deepEqual(calls, []);
-  const sameHour = await make(true, 20);
-  t.after(() => sameHour.close());
-  assert.equal((await sameHour.scheduled!()).outcome, 'exception');
-  assert.deepEqual(calls, ['/calendar', '/v0/search/subjects', '/v0/subjects/1']);
-  assert.equal((await sameHour.sql('SELECT id FROM subjects'))[0]!.id, 1);
 });
 
 test('Worker 日历定时开关关闭时不访问上游', async () => {

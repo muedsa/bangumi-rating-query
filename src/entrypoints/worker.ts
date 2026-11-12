@@ -6,8 +6,6 @@ import { createApp } from '../http/app.ts';
 import { createBangumiSource } from '../adapters/bangumi/client.ts';
 import { CalendarSyncService } from '../core/calendar-sync-service.ts';
 import { runCalendarJob } from '../scheduling/calendar.ts';
-import { TrendsSyncService } from '../core/trends-sync-service.ts';
-import { runTrendsJob } from '../scheduling/trends.ts';
 import { createServerErrorLogger, requestErrorContext } from '../observability/errors.ts';
 
 interface Env {
@@ -23,9 +21,6 @@ interface Env {
   CALENDAR_SYNC_ENABLED?: string;
   CALENDAR_SYNC_HOUR_UTC?: string;
   CALENDAR_PLATFORM_BATCH_SIZE?: string;
-  TRENDS_SYNC_ENABLED?: string;
-  TRENDS_SYNC_HOUR_UTC?: string;
-  TRENDS_SYNC_LIMIT?: string;
 }
 
 let cachedEnv: Env | undefined;
@@ -62,7 +57,7 @@ export default {
     const logError = createServerErrorLogger({
       secrets: [env.ADMIN_TOKEN ?? '', env.BANGUMI_ACCESS_TOKEN ?? ''],
     });
-    const jobs: (() => Promise<unknown>)[] = [];
+    let job: (() => Promise<unknown>) | undefined;
     try {
       const config = readConfig({ ...env });
       const repo = new SqlRepository(new D1Driver(env.DB));
@@ -71,19 +66,11 @@ export default {
         config.CALENDAR_SYNC_ENABLED &&
         controller.cron === `0 ${config.CALENDAR_SYNC_HOUR_UTC} * * *`
       )
-        jobs.push(() =>
+        job = () =>
           runCalendarJob(
             new CalendarSyncService(repo, source, config.CALENDAR_PLATFORM_BATCH_SIZE),
             logError,
-          ),
-        );
-      if (
-        config.TRENDS_SYNC_ENABLED &&
-        controller.cron === `0 ${config.TRENDS_SYNC_HOUR_UTC} * * *`
-      )
-        jobs.push(() =>
-          runTrendsJob(new TrendsSyncService(repo, source, config.TRENDS_SYNC_LIMIT), logError),
-        );
+          );
     } catch (error) {
       logError('scheduled_configuration_error', error, {
         trigger: 'scheduled',
@@ -91,15 +78,6 @@ export default {
       });
       throw new Error('Bangumi 定时同步配置无效');
     }
-    let failed = false;
-    // 即使两个任务配置到同一时刻，一个失败也不能阻止另一个运行。
-    for (const job of jobs) {
-      try {
-        await job();
-      } catch {
-        failed = true;
-      }
-    }
-    if (failed) throw new Error('Bangumi 定时同步失败');
+    await job?.();
   },
 };

@@ -7,6 +7,7 @@ import type {
 } from '../../core/ports.ts';
 import { fromTrendsSearchPage, trendsSearchBody } from './trends.ts';
 import { subjectSearchRequestSchema } from '../../core/subject-search.ts';
+import { TRENDS_PAGE_SIZE, trendsPageSchema } from '../../core/trends.ts';
 
 interface BangumiClientOptions {
   accessToken?: string;
@@ -52,25 +53,20 @@ export class BangumiClient
   async getSubjectPlatform(id: number) {
     return fromApiPlatform(await this.request(`/v0/subjects/${id}`), id);
   }
-  async getTrends(limit = 24) {
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
-      throw new Error('热度同步条目数量必须为 1～100 的整数');
+  async getTrends(page = 1) {
+    const offset = (trendsPageSchema.parse(page) - 1) * TRENDS_PAGE_SIZE;
     const now = Date.now();
-    const body = trendsSearchBody(now);
-    const ids = new Set<number>();
-    let offset = 0;
-    // 上游单页最多 20 条；按原始结果数推进，重复 ID 不额外扩展抓取预算。
-    while (offset < limit) {
-      const pageSize = Math.min(20, limit - offset);
-      const page = fromTrendsSearchPage(
-        await this.request(`/v0/search/subjects?limit=${pageSize}&offset=${offset}`, body),
-      );
-      if (page.data.length > pageSize) throw new Error('Bangumi 搜索结果超过请求数量');
-      for (const item of page.data) ids.add(item.id);
-      offset += page.data.length;
-      if (!page.data.length || offset >= page.total) break;
-    }
-    return { subjectIds: [...ids], fetchedAt: now };
+    const result = fromTrendsSearchPage(
+      await this.request(
+        `/v0/search/subjects?limit=${TRENDS_PAGE_SIZE}&offset=${offset}`,
+        trendsSearchBody(now),
+      ),
+    );
+    return {
+      subjectIds: [...new Set(result.data.map((item) => item.id))],
+      total: result.total,
+      fetchedAt: now,
+    };
   }
   private async request(path: string, body?: unknown): Promise<unknown> {
     // Workers 的全局 fetch 不能以客户端实例作为 this 调用。
@@ -99,7 +95,7 @@ export class BangumiClient
           ? Number(retry) * 1000
           : Date.parse(retry) - Date.now()
         : 1000 * 2 ** attempt;
-      // 长等待交由下一次定时任务处理，不能截短 Retry-After 后提前重试。
+      // 长等待交由下一次调用处理，不能截短 Retry-After 后提前重试。
       if (Number.isFinite(wait) && wait > 60000)
         throw new Error('Bangumi 要求较长时间后重试，请延后同步任务');
       await this.sleep(Math.max(1000, Number.isFinite(wait) ? wait : 1000));

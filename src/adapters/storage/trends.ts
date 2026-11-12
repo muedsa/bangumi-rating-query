@@ -1,5 +1,9 @@
 import { importSchema, type ImportRecord } from '../../core/models.ts';
-import { trendsSyncResultSchema, type TrendsSyncResult } from '../../core/trends.ts';
+import {
+  TRENDS_PAGE_SIZE,
+  trendsSyncResultSchema,
+  type TrendsSyncResult,
+} from '../../core/trends.ts';
 import type { SqlRepository } from './repository.ts';
 import { aliasInsertStatements } from './season-aliases.ts';
 import { sql } from './sql.ts';
@@ -13,7 +17,10 @@ export async function mergeTrends(
 ) {
   const records = input.map((record) => importSchema.parse(record));
   const result = trendsSyncResultSchema.parse(summary);
-  if (records.length > 100 || new Set(records.map((r) => r.subject.id)).size !== records.length)
+  if (
+    records.length > TRENDS_PAGE_SIZE ||
+    new Set(records.map((r) => r.subject.id)).size !== records.length
+  )
     throw new Error('热度同步批次过大或包含重复条目');
   const now = Date.parse(result.dataAsOf);
   const d = repo.dialect;

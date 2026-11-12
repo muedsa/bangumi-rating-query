@@ -18,9 +18,6 @@ const configSchema = z.object({
   CALENDAR_SYNC_ENABLED: bool,
   CALENDAR_SYNC_HOUR_UTC: z.coerce.number().int().min(0).max(23).default(20),
   CALENDAR_PLATFORM_BATCH_SIZE: z.coerce.number().int().min(1).default(10),
-  TRENDS_SYNC_ENABLED: bool,
-  TRENDS_SYNC_HOUR_UTC: z.coerce.number().int().min(0).max(23).default(21),
-  TRENDS_SYNC_LIMIT: z.coerce.number().int().min(1).max(100).default(24),
 });
 export function readConfig(env: Record<string, unknown>) {
   return configSchema.parse(env);

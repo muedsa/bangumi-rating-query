@@ -24,7 +24,7 @@
 - 提供 [AI 辅助人工审核技能](#ai-辅助人工审核技能)，先整理未命中名称的候选，再按用户决定导入、绑定或调整处理计划。
 - Archive 下载、SHA-256 校验、流式解压、分批断点导入，以及单条目 API 更新。
 - Bangumi calendar 全周日历批量导入，支持管理接口、CLI、Worker Cron 和 Node 每日调度。
-- Bangumi 近期热门动画同步，通过搜索 API 按收藏人数排序筛选最近半年的动画，获取完整详情、别名和评分，支持独立的管理接口、Worker Cron 和 Node 每日调度。
+- Bangumi 近期热门动画同步，通过搜索 API 按收藏人数排序筛选最近半年的动画，由外部定时 HTTP 请求指定页码，每页固定 20 条，获取完整详情、别名和评分。
 - 版本化 JSONL 备份恢复，支持 D1、SQLite、PostgreSQL 之间迁移，保留手动别名与统计。
 - 冷数据预览、每日统计清理；首版不自动淘汰条目。
 - `/openapi.json` 提供 OpenAPI 3.1 文档，无前端页面。
@@ -83,7 +83,7 @@ bun run cli sync-archive --file data/subject.jsonlines --as-of 2026-10-20T08:18:
 
 Docker Compose 会透传这三个变量。数据库在其他容器时，连接串应使用其服务名或可访问的主机地址，容器内的 `127.0.0.1` 指向容器自身。PostgreSQL 数据由数据库服务管理，不写入应用的 SQLite 数据卷。Cloudflare Worker 仍使用 D1；CLI 带 `--api-url` 时使用目标服务的数据库配置。
 
-多实例部署时，建议只在一个实例开启 `CALENDAR_SYNC_ENABLED` / `TRENDS_SYNC_ENABLED`，避免重复请求上游；PostgreSQL 适配器不提供分布式定时任务选主。
+多实例部署时，建议只在一个实例开启 `CALENDAR_SYNC_ENABLED`，避免重复请求上游；PostgreSQL 适配器不提供分布式定时任务选主。
 
 可先导入仓库中的**虚构测试数据**验证调用流程：
 
@@ -121,7 +121,7 @@ bun run deploy:worker
 
 `ADMIN_TOKEN` 和 `BANGUMI_ACCESS_TOKEN` 均通过 Cloudflare **Secret（加密变量）** 配置，不放入 `vars`。命令会提示输入值，Bangumi Token 填原始值，不加 `Bearer `。控制台也可在 Worker 的 **Settings → Variables and Secrets → Add → Secret** 中添加同名变量。需要单条目在线更新时，将 `vars.BANGUMI_USER_AGENT` 填成自己的开发者/应用标识，然后部署。Bangumi Token 可选，不配置时使用匿名请求。
 
-`wrangler.jsonc` 已配置两条每日 Cron：`0 20 * * *` 在 **20:00 UTC（北京时间次日 04:00）** 导入全周 calendar，`0 21 * * *` 在 **21:00 UTC（北京时间次日 05:00）** 同步 trends 近期热门动画。`CALENDAR_SYNC_ENABLED="false"` 和 `TRENDS_SYNC_ENABLED="false"` 分别停用对应任务，手动接口仍可用。修改时间时，同步修改 `triggers.crons` 和对应的 `*_SYNC_HOUR_UTC` 小时变量，然后重新部署。
+`wrangler.jsonc` 仅保留 calendar 的每日 Cron：`0 20 * * *` 在 **20:00 UTC（北京时间次日 04:00）** 导入全周日历。设置 `CALENDAR_SYNC_ENABLED="false"` 可停用，手动接口仍可用。修改时间时，同步修改 `triggers.crons` 和 `CALENDAR_SYNC_HOUR_UTC`，然后重新部署。热门动画同步由外部定时 HTTP 请求驱动。
 
 本地 Worker 开发：
 
@@ -546,45 +546,61 @@ Node 调度按 UTC 整点每天执行，重启后等待下一个计划时间；�
 }
 ```
 
-`TRENDS_SYNC_LIMIT` 默认 24，允许 1～100，控制本轮最多读取的搜索结果数。上游单页最多 20 条，自动使用 `limit` / `offset` 分页；例如默认先请求 `?limit=20&offset=0`，再请求 `?limit=4&offset=20`。所有分页使用同一日期范围，按原始结果数推进，重复 ID 去重且不额外扩大读取预算；结果不足或重复时实际更新数量可能较少。先完成全部搜索分页，再获取详情和写库；任一分页失败整轮搜索失败。
+热门同步不再提供 Worker Cron 或 Node 内置调度，也不再使用 `TRENDS_SYNC_ENABLED`、`TRENDS_SYNC_HOUR_UTC`、`TRENDS_SYNC_LIMIT`。更新 Worker 后，仓库配置会移除原 `0 21 * * *` 触发器；如果曾在控制台另建该触发器，也应删除。calendar 的定时任务独立保留。
 
-定时开关默认与 calendar 独立：
+使用外部定时服务、系统任务计划或脚本调用：
 
-| 环境          | 启用方式                                                                 | 默认时间                                        |
-| ------------- | ------------------------------------------------------------------------ | ----------------------------------------------- |
-| Worker        | `wrangler.jsonc` 已设置 `TRENDS_SYNC_ENABLED="true"` 并添加 `0 21 * * *` | 每天 21:00 UTC，即北京时间次日 05:00            |
-| Node / Docker | `.env` 设置 `TRENDS_SYNC_ENABLED=true` 并重启                            | 同上；通过 `TRENDS_SYNC_HOUR_UTC` 修改 UTC 小时 |
-
-Worker 的两条 Cron 分别对应 calendar 的 `CALENDAR_SYNC_HOUR_UTC=20` 和 trends 的 `TRENDS_SYNC_HOUR_UTC=21`。**修改 Worker 执行时间时，必须同时修改对应小时变量与 `triggers.crons` 的 `0 <小时> * * *` 表达式，然后重新部署**；仅修改变量不会创建平台触发器，不匹配的表达式不会执行任务。两个任务配置为同一小时也可执行，两者依次运行，一个失败不会阻止另一个。
-
-Node 在下一个 UTC 整点运行，启动时不立即同步；任务结束后安排次日执行，同一个任务不会在本进程内重叠。停止服务时取消待执行计时器；停机期间不补跑。手动接口与定时任务之间没有分布式互斥，多实例只需启用一个调度实例。
-
-手动立即触发使用现有管理 Token，无请求参数或正文，不受 `TRENDS_SYNC_ENABLED` 开关影响。PowerShell 示例（先在当前终端设置 `ADMIN_TOKEN`；不把实际凭证写入脚本）：
-
-```powershell
-$apiUrl = 'http://localhost:3000'
-$headers = @{ Authorization = "Bearer $env:ADMIN_TOKEN" }
-Invoke-RestMethod -Method Post -Uri "$apiUrl/api/v1/admin/trends/sync" -Headers $headers
+```http
+POST /api/v1/admin/trends/sync?page=1
+Authorization: Bearer <ADMIN_TOKEN>
 ```
 
-成功返回 `discovered`（本轮搜索去重数量，不是上游匹配总数）、`attempted`（本次选取数量）、`imported`（成功参与合并数量）、`failedIds`、`dataAsOf` 和 `status`。`complete` 表示本次选取的条目都成功，或搜索无结果；部分详情失败时为 `partial`，HTTP 仍为 200，已成功的条目正常入库。重复调用会重新搜索当前日期范围并获取详情，不是从失败 ID 断点续跑。
+`page` 是 URL 查询参数，从 **1** 开始，省略时默认 1，必须为正整数且换算出的 offset 是安全整数。无需请求正文。每次仅搜索指定页，固定 `limit=20`、`offset=(page-1)*20`，不会自动获取后续页。例如第 1 页对应 `offset=0`，第 2 页对应 `offset=20`。每页按上游顺序去重后最多获取 20 条详情，结果不足或重复时实际导入数量会减少。
 
-所有成功详情集中写入一个事务，复用现有别名并发协调机制：按版本更新完整元数据、官方别名和评分，保留手动别名、首次入库时间与固定标记，补全季数别名并清理对应未命中记录。整批数据库写入失败时回滚本轮写入。不会删除不再符合搜索条件或热度降低的条目，也不增加用户访问统计。SQLite、D1、PostgreSQL 使用相同的合并规则，无新增数据库迁移。
+PowerShell 示例（事先在当前终端设置 `ADMIN_TOKEN`）：
 
-每轮成功或部分成功时，在同一事务保存 `sync_state` 的 `trends:last_sync`，内容与接口响应一致。查询最近一次结果：
+```powershell
+$apiUrl = 'https://bgm.muedsa.com'
+$headers = @{ Authorization = "Bearer $env:ADMIN_TOKEN" }
+$result = Invoke-RestMethod -Method Post -Uri "$apiUrl/api/v1/admin/trends/sync?page=1" -Headers $headers
+$result | ConvertTo-Json -Depth 5
+```
+
+外部定时服务设置为 **POST**，通过请求头传入管理 Token，并在 URL 中指定需要处理的页码。可以错开安排 `?page=1`、`?page=2` 等独立请求；不要把 Token 放进 URL。按顺序调用的脚本可以读取响应 `nextPage` 决定下一次请求的页码，`null` 表示本页为空或已到末页。服务端不会自动推进或保留下一页游标。
+
+响应示例：
+
+```json
+{
+  "page": 1,
+  "pageSize": 20,
+  "total": 41,
+  "nextPage": 2,
+  "discovered": 20,
+  "attempted": 20,
+  "imported": 20,
+  "failedIds": [],
+  "dataAsOf": "2026-11-12T00:00:00.000Z",
+  "status": "complete"
+}
+```
+
+`total` 是上游返回的匹配总数；`discovered` 是本页去重数量，`attempted` 是详情请求条目数，`imported` 是成功参与合并数量。`complete` 只表示本页全部成功或本页为空，不表示所有页完成；部分详情失败时为 `partial`，HTTP 仍为 200，成功的条目正常入库。外部调度器应记录响应和 `X-Request-ID`，检查 `failedIds`；可重试同一页，或通过单条同步接口补齐失败条目。`nextPage` 不代表当前页没有失败。
+
+重复调用同一页会重新搜索并获取详情；分页不是一致性快照，热度、总数和跨 UTC 日期的搜索范围可能变化。建议相邻页面在较短时间内串行处理，后续轮次再从第 1 页刷新。
+
+本页成功详情集中写入一个事务，按版本更新元数据、官方别名和评分，保留手动别名、首次入库时间与固定标记，补全季数别名并清理对应未命中记录。数据库写入失败回滚本页。不会删除不再热门的条目，不增加访问统计。SQLite、D1、PostgreSQL 使用相同规则，无新增迁移。
+
+每页成功或部分成功时，在同一事务保存 `sync_state` 的 `trends:last_sync`，内容与响应一致，包含本次 `page`，只代表最近一页的结果，不是整轮所有页面的汇总。外部调度器需要自行保存各页结果。查询最近结果：
 
 ```powershell
 $state = Invoke-RestMethod -Uri "$apiUrl/api/v1/admin/sync-state/trends%3Alast_sync" -Headers $headers
 $state.value | ConvertFrom-Json
 ```
 
-搜索请求失败或响应校验失败时，返回 `503 BANGUMI_TRENDS_ERROR`；所有详情失败时返回 `503 BANGUMI_API_ERROR`。这些失败不会覆盖上次结果，因此排查时还应查看日志时间。定时日志包含 `trends_sync_complete` / `trends_sync_partial` / `trends_sync_failed`，单条详情失败额外记录 `trends_subject_failed`、条目 ID 和关联请求 ID；Worker 整轮失败向平台报告异常。
+页码无效返回 `400 INVALID_INPUT`，不请求上游；搜索请求或响应校验失败返回 `503 BANGUMI_TRENDS_ERROR`；本页所有详情失败返回 `503 BANGUMI_API_ERROR`。这些失败不覆盖上次摘要。空页是成功：三个计数为 0、`failedIds=[]`、`nextPage=null`、`status=complete`，只保存摘要，已有条目保持不变。整次请求失败记录 `request_failed`，单条详情失败记录 `trends_subject_failed`（包含页码、条目 ID 和关联请求 ID）。
 
-搜索无结果属于成功：`discovered`、`attempted`、`imported` 均为 0，`failedIds=[]`、`status=complete`。此时只保存本轮摘要，不删除已有条目。
-
-搜索和详情请求均使用 `BANGUMI_USER_AGENT`；配置 `BANGUMI_ACCESS_TOKEN` 后均发送 `Authorization: Bearer <Token>`。Worker 继续使用同名 Secret。
-
-一轮上游请求由搜索分页和 `attempted` 次详情请求组成；默认 24 条在结果充足时是 2 次搜索加 24 次详情，共 26 次 API 请求。详情串行获取，数据库采用 JSON 参数批量合并，避免逐条导入造成大量 D1 请求。上游 429/5xx 最多尝试 3 次，遵守 `Retry-After`，超过 60 秒的等待交由下轮任务；重试仍消耗请求额度。可降低 `TRENDS_SYNC_LIMIT` 控制免费 Worker 的请求、CPU 和数据库预算，配置上限不代表运行平台一定有足够额度。
+搜索和详情请求均使用 `BANGUMI_USER_AGENT`；配置 `BANGUMI_ACCESS_TOKEN` 后均发送 Bearer Token，Worker 使用同名 Secret。**HTTP 触发仍受 Worker 子请求额度限制**，分页将正常单次调用控制为 1 次搜索加最多 20 次详情请求；重试和 D1 操作仍消耗额度。上游 429/5xx 最多尝试 3 次，遵守 `Retry-After`；要求等待超过 60 秒时失败，由外部调度器延后重试。
 
 ## 访问统计与冷数据
 
@@ -796,9 +812,6 @@ bun run cli import --file backup.jsonl --api-url https://your-worker.example.com
 | `CALENDAR_SYNC_ENABLED`        | Node 默认 `false`，Worker 配置为 `true` | 是否启用日历定时任务，仅接受 `true` / `false`，不影响手动导入                 |
 | `CALENDAR_SYNC_HOUR_UTC`       | `20`                                    | 每日日历任务 UTC 小时，0～23；Worker 需同步修改 `triggers.crons`              |
 | `CALENDAR_PLATFORM_BATCH_SIZE` | `10`                                    | 单次日历同步最多补全的空作品形式数量，允许任意正整数                          |
-| `TRENDS_SYNC_ENABLED`          | Node 默认 `false`，Worker 配置为 `true` | 是否启用近期热门动画定时任务，独立于 calendar，不影响手动同步                 |
-| `TRENDS_SYNC_HOUR_UTC`         | `21`                                    | 每日热度任务 UTC 小时，0～23；Worker 需同步修改 `triggers.crons`              |
-| `TRENDS_SYNC_LIMIT`            | `24`                                    | 最多读取多少条搜索结果，1～100；每页最多 20 条，按收藏人数排序                |
 
 ## 服务端异常日志
 
@@ -808,7 +821,7 @@ Node 和 Worker 的服务端错误以 JSON Lines 输出到标准错误或 Cloudf
 - `usage_write_failed`：统计写入失败，包含错误原因和当前请求 ID，但不影响查询成功返回。
 - `worker_configuration_error`：Worker 初始化失败，保留配置错误原因和请求 ID。此时路由尚未初始化，日志路径标记为 `[worker-initialization]`。
 - `calendar_sync_failed`：Node/Worker 定时任务失败，使用 `trigger=scheduled` 和独立 ID 关联；保留上游或数据库原因，向平台抛出的错误仍使用通用消息。
-- `trends_sync_failed` / `trends_subject_failed`：热度同步整轮或单条详情失败；单条包含 `subjectId`，同一轮使用相同关联 ID。手动调用时使用 HTTP 请求 ID。
+- `trends_subject_failed`：热门动画单条详情失败，包含 `page`、`subjectId` 和 HTTP 请求 ID；整次请求失败使用 `request_failed`。
 - `scheduled_configuration_error`：Worker 定时入口配置无效，尚未开始执行具体任务。
 
 错误日志中的 `causes` 最多包含 5 层原因链，每层消息最多 2000 字符、堆栈最多 8 帧；不会直接序列化异常附带的 `query`、`params` 等属性。已配置的管理 Token、Bangumi Token（包括编码形式）、Bearer 凭证、URL、引号内文本及标记出的 SQL/参数/正文片段会脱敏。HTTP 错误响应继续使用公开错误消息，不向调用者返回原因链或堆栈。

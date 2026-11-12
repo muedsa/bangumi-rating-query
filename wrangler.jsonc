@@ -14,13 +14,10 @@
     "CALENDAR_SYNC_ENABLED": "true",
     "CALENDAR_SYNC_HOUR_UTC": "20",
     "CALENDAR_PLATFORM_BATCH_SIZE": "1000",
-    "TRENDS_SYNC_ENABLED": "true",
-    "TRENDS_SYNC_HOUR_UTC": "21",
-    "TRENDS_SYNC_LIMIT": "96",
   },
   "triggers": {
-    // 修改小时配置时需同步修改这里的 UTC Cron；两个任务各自匹配对应的表达式。
-    "crons": ["0 20 * * *", "0 21 * * *"],
+    // 仅 calendar 使用内置定时任务；修改小时配置时需同步修改这里的 UTC Cron。
+    "crons": ["0 20 * * *"],
   },
   // ADMIN_TOKEN 和 BANGUMI_ACCESS_TOKEN 通过 wrangler secret put 配置，禁止在 vars 中填写。
   "d1_databases": [

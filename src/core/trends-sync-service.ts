@@ -1,18 +1,23 @@
 import { AppError, importSchema, type ImportRecord } from './models.ts';
 import type { ApplicationRepository, TrendsSource } from './ports.ts';
-import { trendsSnapshotSchema, type TrendsSyncResult } from './trends.ts';
+import {
+  TRENDS_PAGE_SIZE,
+  trendsPageSchema,
+  trendsSnapshotSchema,
+  type TrendsSyncResult,
+} from './trends.ts';
 
 export class TrendsSyncService {
   constructor(
     private repo: Pick<ApplicationRepository, 'mergeTrends'>,
     private source?: TrendsSource,
-    private limit = 24,
-  ) {
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
-      throw new Error('热度同步条目数量必须为 1～100 的整数');
-  }
+  ) {}
 
-  async sync(onSubjectError?: (id: number, error: unknown) => void): Promise<TrendsSyncResult> {
+  async sync(
+    page = 1,
+    onSubjectError?: (id: number, error: unknown) => void,
+  ): Promise<TrendsSyncResult> {
+    trendsPageSchema.parse(page);
     if (!this.source)
       throw new AppError(
         503,
@@ -21,7 +26,7 @@ export class TrendsSyncService {
       );
     let snapshot;
     try {
-      snapshot = trendsSnapshotSchema.parse(await this.source.getTrends(this.limit));
+      snapshot = trendsSnapshotSchema.parse(await this.source.getTrends(page));
     } catch (error) {
       throw new AppError(
         503,
@@ -31,11 +36,10 @@ export class TrendsSyncService {
       );
     }
     const ids = [...new Set(snapshot.subjectIds)];
-    const selected = ids.slice(0, this.limit);
     const records: ImportRecord[] = [];
     const failedIds: number[] = [];
     let lastError: unknown;
-    for (const id of selected) {
+    for (const id of ids) {
       try {
         const record = importSchema.parse(await this.source.getSubject(id));
         if (record.subject.id !== id) throw new Error('Bangumi 详情条目 ID 与请求不一致');
@@ -46,13 +50,20 @@ export class TrendsSyncService {
         onSubjectError?.(id, error);
       }
     }
-    if (selected.length && !records.length)
+    if (ids.length && !records.length)
       throw new AppError(503, 'BANGUMI_API_ERROR', 'Bangumi 热度条目详情均获取失败，请稍后重试', {
         cause: lastError,
       });
     const result: TrendsSyncResult = {
+      page,
+      pageSize: TRENDS_PAGE_SIZE,
+      total: snapshot.total,
+      nextPage:
+        ids.length > 0 && snapshot.total - (page - 1) * TRENDS_PAGE_SIZE > TRENDS_PAGE_SIZE
+          ? page + 1
+          : null,
       discovered: ids.length,
-      attempted: selected.length,
+      attempted: ids.length,
       imported: records.length,
       failedIds,
       dataAsOf: new Date(snapshot.fetchedAt).toISOString(),

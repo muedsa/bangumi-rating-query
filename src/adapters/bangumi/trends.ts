@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { positiveId } from '../../core/models.ts';
+import { TRENDS_PAGE_SIZE } from '../../core/trends.ts';
 
 const trendsSearchSchema = z.object({
   total: z.number().int().nonnegative(),
-  data: z.array(z.object({ id: positiveId, type: z.literal(2) })).max(20),
+  data: z.array(z.object({ id: positiveId, type: z.literal(2) })).max(TRENDS_PAGE_SIZE),
 });
 
 /** 按 UTC 日期回溯六个日历月，包含起止日；月底截短到目标月份最后一天。 */

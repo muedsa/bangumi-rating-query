@@ -27,7 +27,7 @@ export interface CalendarSource {
 }
 
 export interface TrendsSource extends SubjectSource {
-  getTrends(limit: number): Promise<TrendsSnapshot>;
+  getTrends(page: number): Promise<TrendsSnapshot>;
 }
 
 export interface AnimeRepository {

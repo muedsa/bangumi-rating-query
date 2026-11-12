@@ -128,7 +128,7 @@ test('OpenAPI 契约：全部操作在真实路由和 SQLite 上返回文档声�
       },
       trendsSource: {
         async getTrends() {
-          return { subjectIds: [910, 911], fetchedAt: timestamp };
+          return { subjectIds: [910, 911], total: 2, fetchedAt: timestamp };
         },
         async getSubject(id) {
           if (failPlatform && id === 911) throw new Error('模拟详情失败');
@@ -218,6 +218,10 @@ test('OpenAPI 契约：全部操作在真实路由和 SQLite 上返回文档声�
   assert.deepEqual(partial.platformFailures, [901]);
   const trends = await request('/api/v1/admin/trends/sync', 'POST');
   assert.equal(trends.status, 'partial');
+  assert.equal(trends.page, 1);
+  assert.equal(trends.pageSize, 20);
+  assert.equal(trends.nextPage, null);
+  await request('/api/v1/admin/trends/sync?page=0', 'POST', undefined, 400);
   assert.deepEqual(trends.failedIds, [911]);
   failPlatform = false;
   assert.equal((await request('/api/v1/admin/calendar/sync', 'POST')).status, 'complete');

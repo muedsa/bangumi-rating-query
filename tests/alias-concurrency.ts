@@ -149,6 +149,10 @@ for (const kind of ['sqlite', 'd1', 'postgres'] as const) {
     [first, second] = simultaneousPlans(driver, other);
     await Promise.all([
       first.mergeTrends([record(7, '热度并发')], {
+        page: 1,
+        pageSize: 20,
+        total: 1,
+        nextPage: null,
         discovered: 1,
         attempted: 1,
         imported: 1,
@@ -162,7 +166,7 @@ for (const kind of ['sqlite', 'd1', 'postgres'] as const) {
       assert((await first.listAliases(7)).some((a) => a.name === name));
   });
 
-  test(`${kind}: trends 24 条详情采用固定数量批量查询和单次事务`, async (t) => {
+  test(`${kind}: trends 20 条详情采用固定数量批量查询和单次事务`, async (t) => {
     const { driver, close } = await setup(kind);
     t.after(close);
     let reads = 0;
@@ -180,11 +184,15 @@ for (const kind of ['sqlite', 'd1', 'postgres'] as const) {
         return driver.batch(batch);
       },
     });
-    const records = Array.from({ length: 24 }, (_, i) => record(1000 + i, `热门动画${i}`));
+    const records = Array.from({ length: 20 }, (_, i) => record(1000 + i, `热门动画${i}`));
     await repo.mergeTrends(records, {
-      discovered: 24,
-      attempted: 24,
-      imported: 24,
+      page: 1,
+      pageSize: 20,
+      total: 20,
+      nextPage: null,
+      discovered: 20,
+      attempted: 20,
+      imported: 20,
       failedIds: [],
       dataAsOf: new Date(10).toISOString(),
       status: 'complete',
@@ -192,7 +200,7 @@ for (const kind of ['sqlite', 'd1', 'postgres'] as const) {
     assert.equal(reads, 4); // 版本、已有条目、关联别名、别名容量。
     assert.equal(writes, 1);
     assert(statements <= 7);
-    assert.equal((await repo.findSubjects(records.map((r) => r.subject.id))).length, 24);
+    assert.equal((await repo.findSubjects(records.map((r) => r.subject.id))).length, 20);
   });
 
   test(`${kind}: 并发修改、删除和备份恢复使旧第一季归属失效，不能误绑`, async (t) => {

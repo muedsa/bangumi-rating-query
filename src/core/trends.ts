@@ -1,12 +1,25 @@
 import { z } from 'zod';
 import { positiveId, timestamp } from './models.ts';
 
+export const TRENDS_PAGE_SIZE = 20;
+// 保证换算后的上游 offset 仍为安全整数。
+export const MAX_TRENDS_PAGE = Math.floor(Number.MAX_SAFE_INTEGER / TRENDS_PAGE_SIZE) + 1;
+export const trendsPageSchema = z.number().int().min(1).max(MAX_TRENDS_PAGE);
+export const trendsSyncRequestSchema = z.object({ page: trendsPageSchema.default(1) });
+
 export const trendsSnapshotSchema = z.object({
-  subjectIds: z.array(positiveId).max(100),
+  subjectIds: z.array(positiveId).max(TRENDS_PAGE_SIZE),
+  total: z.number().int().nonnegative(),
   fetchedAt: timestamp,
 });
 
 export const trendsSyncResultSchema = z.object({
+  page: trendsPageSchema.describe('本次同步的搜索页码，从 1 开始。'),
+  pageSize: z.literal(TRENDS_PAGE_SIZE).describe('每次固定请求 20 条搜索结果。'),
+  total: z.number().int().nonnegative().describe('上游返回的匹配总数，未去重。'),
+  nextPage: trendsPageSchema
+    .nullable()
+    .describe('下一页页码；到达末页或本页为空时为 null，不自动续跑。'),
   discovered: z.number().int().nonnegative().describe('本次搜索返回并去重后的动画条目数量。'),
   attempted: z
     .number()

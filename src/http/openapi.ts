@@ -8,7 +8,7 @@ import {
 } from '../core/models.ts';
 import { backupSchema } from '../core/backup.ts';
 import { calendarSyncResultSchema } from '../core/calendar.ts';
-import { trendsSyncResultSchema } from '../core/trends.ts';
+import { MAX_TRENDS_PAGE, trendsSyncResultSchema } from '../core/trends.ts';
 import { subjectSearchRequestSchema, subjectSearchResultSchema } from '../core/subject-search.ts';
 import {
   aliasBodySchema,
@@ -543,11 +543,38 @@ export function getOpenApi(maxBatchSize: number) {
           admin: true,
           summary: '同步最近半年的热门动画详情和评分',
           description:
-            '无参数、无请求正文；手动调用不受 TRENDS_SYNC_ENABLED 控制。通过 POST /v0/search/subjects，以空 keyword、sort=heat（收藏人数排序）、filter.type=[2] 搜索。filter.air_date 为 UTC 当天向前六个日历月，包含起止日；月底截短至目标月末，排除未来日期。例如 2026-11-11 使用 [">=2026-05-11", "<2026-11-12"]。最多读取 TRENDS_SYNC_LIMIT 条（默认 24，允许 1～100），每页最多 20 条自动分页；按原始结果数推进，重复 ID 去重且不补齐。所有搜索分页成功后，依次获取完整详情。搜索和详情均使用配置的 Bearer Token。成功详情和 trends:last_sync 在同一事务合并，保留手动别名、首次入库时间和固定标记，按版本更新评分与官方别名。部分详情失败返回 200 partial；全部详情失败返回 503 BANGUMI_API_ERROR；搜索分页失败返回 503 BANGUMI_TRENDS_ERROR，存储失败回滚。空搜索返回 200 complete，数量均为 0，只保存摘要。同步不计用户访问，不删除旧条目；重复调用重新搜索，不是断点续跑。',
+            '由外部定时 HTTP 请求驱动，无内置 trends 定时任务。query 参数 page 从 1 开始，省略为 1；无请求正文。每次只调用一页 POST /v0/search/subjects，limit 固定 20，offset=(page-1)*20，不自动翻页。使用空 keyword、sort=heat（收藏人数排序）、filter.type=[2]，air_date 为 UTC 当天向前六个日历月，包含起止日，月底截短至目标月末，排除未来日期。按本页顺序去重后依次获取详情，搜索和详情均使用配置的 Bearer Token。本页成功详情和 trends:last_sync 在同一事务合并，保留手动别名、首次入库时间和固定标记。响应 page/pageSize/total/nextPage 用于外部调度；末页或空页的 nextPage 为 null。partial 仍返回 200，失败 ID 需单独补同步或重试本页；全部详情失败返回 503 BANGUMI_API_ERROR。搜索失败返回 503 BANGUMI_TRENDS_ERROR，数据库失败回滚。空页返回 complete，只保存摘要。complete 只表示本页已处理，不代表所有页面完成。请求正常时为 1 次搜索加最多 20 次详情；重试及数据库操作另计平台额度。',
+          parameters: [
+            {
+              name: 'page',
+              in: 'query',
+              required: false,
+              description:
+                '搜索页码，从 1 开始，默认 1。固定每页 20 条，上游 offset=(page-1)*20；只同步指定页。',
+              schema: { type: 'integer', minimum: 1, maximum: MAX_TRENDS_PAGE, default: 1 },
+              example: 1,
+            },
+          ],
           response: 'TrendsSyncResponse',
           success: '检查 status 和 failedIds；complete 表示本次选取条目全部成功或搜索无结果。',
           examples: {
+            nextPage: example({
+              page: 1,
+              pageSize: 20,
+              total: 41,
+              nextPage: 2,
+              discovered: 20,
+              attempted: 20,
+              imported: 20,
+              failedIds: [],
+              dataAsOf: '2026-11-12T00:00:00.000Z',
+              status: 'complete',
+            }),
             empty: example({
+              page: 3,
+              pageSize: 20,
+              total: 40,
+              nextPage: null,
               discovered: 0,
               attempted: 0,
               imported: 0,
@@ -556,6 +583,10 @@ export function getOpenApi(maxBatchSize: number) {
               status: 'complete',
             }),
             complete: example({
+              page: 2,
+              pageSize: 20,
+              total: 22,
+              nextPage: null,
               discovered: 2,
               attempted: 2,
               imported: 2,
@@ -564,6 +595,10 @@ export function getOpenApi(maxBatchSize: number) {
               status: 'complete',
             }),
             partial: example({
+              page: 2,
+              pageSize: 20,
+              total: 22,
+              nextPage: null,
               discovered: 2,
               attempted: 2,
               imported: 1,
@@ -573,6 +608,7 @@ export function getOpenApi(maxBatchSize: number) {
             }),
           },
           errors: [
+            'INVALID_INPUT',
             'BANGUMI_SYNC_DISABLED',
             'BANGUMI_TRENDS_ERROR',
             'BANGUMI_API_ERROR',
